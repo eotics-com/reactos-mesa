@@ -21,9 +21,9 @@
  * IN THE SOFTWARE.
  */
 
+#ifndef USE_VC4_D3DKMT
 #include <xf86drm.h>
-#include <err.h>
-
+#endif
 #include "pipe/p_defines.h"
 #include "util/ralloc.h"
 #include "util/u_inlines.h"
@@ -60,9 +60,11 @@ vc4_pipe_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
                 int fd = -1;
 
                 if (flags & PIPE_FLUSH_FENCE_FD) {
+#ifndef USE_VC4_D3DKMT
                         /* The vc4_fence takes ownership of the returned fd. */
                         drmSyncobjExportSyncFile(vc4->fd, vc4->job_syncobj,
                                                  &fd);
+#endif
                 }
 
                 struct vc4_fence *f = vc4_fence_create(vc4->screen,
@@ -137,8 +139,10 @@ vc4_context_destroy(struct pipe_context *pctx)
         vc4_program_fini(pctx);
 
         if (vc4->screen->has_syncobj) {
+#ifndef USE_VC4_D3DKMT
                 drmSyncobjDestroy(vc4->fd, vc4->job_syncobj);
                 drmSyncobjDestroy(vc4->fd, vc4->in_syncobj);
+#endif
         }
         if (vc4->in_fence_fd >= 0)
                 close(vc4->in_fence_fd);

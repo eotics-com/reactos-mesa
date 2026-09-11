@@ -161,6 +161,20 @@ option(
 )
 
 option(
+  'reactos-source-dir',
+  type : 'string',
+  value : '',
+  description : 'ReactOS source directory for the VC4 D3DKMT winsys',
+)
+
+option(
+  'reactos-build-dir',
+  type : 'string',
+  value : '',
+  description : 'ReactOS build directory containing librpi3vc4kmt.a',
+)
+
+option(
   'gallium-d3d10-dll-name',
   type : 'string',
   value : 'libgallium_d3d10',

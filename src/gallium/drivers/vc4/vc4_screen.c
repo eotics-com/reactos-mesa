@@ -37,7 +37,12 @@
 #include "util/perf/cpu_trace.h"
 #include "util/ralloc.h"
 
+#ifdef USE_VC4_D3DKMT
+#include <windows.h>
+#include "vc4/d3dkmt/vc4_d3dkmt_public.h"
+#else
 #include <xf86drm.h>
+#endif
 #include "drm-uapi/drm_fourcc.h"
 #include "drm-uapi/vc4_drm.h"
 #include "vc4_screen.h"
@@ -103,8 +108,12 @@ vc4_screen_destroy(struct pipe_screen *pscreen)
 {
         struct vc4_screen *screen = vc4_screen(pscreen);
 
+#ifdef USE_VC4_D3DKMT
+        pipe_resource_reference(&screen->primary_resource, NULL);
+#endif
         _mesa_hash_table_destroy(screen->bo_handles, NULL);
         vc4_bufmgr_destroy(pscreen);
+        mtx_destroy(&screen->bo_cache.lock);
         slab_destroy_parent(&screen->transfer_pool);
         if (screen->ro)
                 screen->ro->destroy(screen->ro);
@@ -115,9 +124,237 @@ vc4_screen_destroy(struct pipe_screen *pscreen)
 
         u_transfer_helper_destroy(pscreen->transfer_helper);
 
+#ifdef USE_VC4_D3DKMT
+        vc4_d3dkmt_close(screen->fd);
+#else
         close(screen->fd);
+#endif
         ralloc_free(pscreen);
 }
+
+#ifdef USE_VC4_D3DKMT
+static bool
+vc4_get_direct_present_origin(HDC hdc, unsigned width, unsigned height,
+                              unsigned *destination_x,
+                              unsigned *destination_y,
+                              unsigned *screen_width,
+                              unsigned *screen_height)
+{
+        HWND window = WindowFromDC(hdc);
+        RECT client_rect = { 0 };
+        RECT clip_rect = { 0 };
+        POINT origin = { 0 };
+        int object_type = GetObjectType(hdc);
+        BOOL visible = window && IsWindowVisible(window);
+        BOOL iconic = window && IsIconic(window);
+        int map_mode = GetMapMode(hdc);
+        BOOL client_ok = window && GetClientRect(window, &client_rect);
+        BOOL origin_ok = GetDCOrgEx(hdc, &origin);
+        int clip_type = GetClipBox(hdc, &clip_rect);
+        int display_width = GetDeviceCaps(hdc, HORZRES);
+        int display_height = GetDeviceCaps(hdc, VERTRES);
+
+        if (object_type != OBJ_DC || !window || !visible || iconic ||
+            map_mode != MM_TEXT || !client_ok || !origin_ok ||
+            clip_type != SIMPLEREGION ||
+            display_width <= 0 || display_height <= 0 ||
+            client_rect.left != 0 || client_rect.top != 0 ||
+            client_rect.right != (LONG)width ||
+            client_rect.bottom != (LONG)height ||
+            clip_rect.left != client_rect.left ||
+            clip_rect.top != client_rect.top ||
+            clip_rect.right != client_rect.right ||
+            clip_rect.bottom != client_rect.bottom ||
+            origin.x < 0 || origin.y < 0 ||
+            (uint64_t)(unsigned)origin.x + width > (unsigned)display_width ||
+            (uint64_t)(unsigned)origin.y + height > (unsigned)display_height)
+        {
+                return false;
+        }
+
+        *destination_x = origin.x;
+        *destination_y = origin.y;
+        *screen_width = display_width;
+        *screen_height = display_height;
+        return true;
+}
+
+static bool
+vc4_get_primary_resource(struct vc4_screen *screen,
+                         struct pipe_resource **resource)
+{
+        struct pipe_resource templ = { 0 };
+        struct winsys_handle whandle = { 0 };
+        uintptr_t global_share;
+        uint32_t width;
+        uint32_t height;
+        uint32_t pitch;
+
+        if (!vc4_d3dkmt_primary_info(screen->fd, &global_share,
+                                     &width, &height, &pitch))
+        {
+                return false;
+        }
+
+        if (screen->primary_resource &&
+            (screen->primary_global_share != global_share ||
+             screen->primary_width != width ||
+             screen->primary_height != height ||
+             screen->primary_pitch != pitch))
+        {
+                pipe_resource_reference(&screen->primary_resource, NULL);
+        }
+
+        if (!screen->primary_resource)
+        {
+                templ.target = PIPE_TEXTURE_2D;
+                templ.format = PIPE_FORMAT_B8G8R8X8_UNORM;
+                templ.width0 = width;
+                templ.height0 = height;
+                templ.depth0 = 1;
+                templ.array_size = 1;
+                templ.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SHARED;
+
+                whandle.type = WINSYS_HANDLE_TYPE_SHARED;
+                whandle.handle = (void *)global_share;
+                whandle.stride = pitch;
+                whandle.modifier = DRM_FORMAT_MOD_LINEAR;
+                screen->primary_resource = screen->base.resource_from_handle(
+                        &screen->base, &templ, &whandle,
+                        PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
+                if (!screen->primary_resource)
+                {
+                        return false;
+                }
+
+                screen->primary_global_share = global_share;
+                screen->primary_width = width;
+                screen->primary_height = height;
+                screen->primary_pitch = pitch;
+        }
+
+        *resource = screen->primary_resource;
+        return true;
+}
+
+static bool
+vc4_present_primary(struct pipe_screen *pscreen,
+                    struct pipe_context *ctx,
+                    struct pipe_resource *source,
+                    HDC hdc,
+                    unsigned width,
+                    unsigned height)
+{
+        struct vc4_screen *screen = vc4_screen(pscreen);
+        struct pipe_resource *primary;
+        struct pipe_box source_box;
+        RECT dirty_rect;
+        unsigned destination_x;
+        unsigned destination_y;
+        unsigned screen_width;
+        unsigned screen_height;
+
+        if (!ctx ||
+            !vc4_get_direct_present_origin(hdc, width, height,
+                                           &destination_x, &destination_y,
+                                           &screen_width, &screen_height) ||
+            !vc4_get_primary_resource(screen, &primary) ||
+            primary->width0 != screen_width ||
+            primary->height0 != screen_height)
+        {
+                return false;
+        }
+
+        source_box.x = 0;
+        source_box.y = 0;
+        source_box.z = 0;
+        source_box.width = width;
+        source_box.height = height;
+        source_box.depth = 1;
+        ctx->resource_copy_region(ctx, primary, 0,
+                                  destination_x, destination_y, 0,
+                                  source, 0, &source_box);
+        ctx->flush(ctx, NULL, PIPE_FLUSH_END_OF_FRAME);
+
+        dirty_rect.left = destination_x;
+        dirty_rect.top = destination_y;
+        dirty_rect.right = destination_x + width;
+        dirty_rect.bottom = destination_y + height;
+        return vc4_d3dkmt_present_primary(
+                screen->fd, vc4_resource(primary)->bo->handle,
+                WindowFromDC(hdc), &dirty_rect);
+}
+
+static void
+vc4_screen_flush_frontbuffer(struct pipe_screen *pscreen,
+                             struct pipe_context *ctx,
+                             struct pipe_resource *resource,
+                             unsigned level, unsigned layer,
+                             void *winsys_drawable_handle,
+                             unsigned nboxes, struct pipe_box *subbox)
+{
+        struct vc4_resource *rsc = vc4_resource(resource);
+        BITMAPV5HEADER bitmap = { 0 };
+        unsigned width = u_minify(resource->width0, level);
+        unsigned height = u_minify(resource->height0, level);
+        const uint8_t *map;
+        const uint8_t *pixels;
+
+        (void)pscreen;
+        (void)ctx;
+        (void)nboxes;
+        (void)subbox;
+
+        if (!winsys_drawable_handle || level >= VC4_MAX_MIP_LEVELS ||
+            layer >= resource->array_size || rsc->cpp != 4 || rsc->tiled)
+                return;
+
+        switch (resource->format) {
+        case PIPE_FORMAT_B8G8R8X8_UNORM:
+        case PIPE_FORMAT_B8G8R8A8_UNORM:
+                bitmap.bV5Compression = BI_RGB;
+                if (vc4_present_primary(pscreen, ctx, resource,
+                                        winsys_drawable_handle,
+                                        width, height))
+                        return;
+                break;
+        case PIPE_FORMAT_R8G8B8X8_UNORM:
+        case PIPE_FORMAT_R8G8B8A8_UNORM:
+                bitmap.bV5Compression = BI_BITFIELDS;
+                bitmap.bV5RedMask = 0x000000ff;
+                bitmap.bV5GreenMask = 0x0000ff00;
+                bitmap.bV5BlueMask = 0x00ff0000;
+                break;
+        default:
+                return;
+        }
+
+        map = vc4_bo_map(rsc->bo);
+        if (!map)
+                return;
+        pixels = map + rsc->slices[level].offset +
+                 layer * rsc->cube_map_stride;
+
+        bitmap.bV5Size = sizeof(bitmap);
+        bitmap.bV5Width = rsc->slices[level].stride / rsc->cpp;
+        bitmap.bV5Height = -(LONG)height;
+        bitmap.bV5Planes = 1;
+        bitmap.bV5BitCount = 32;
+        bitmap.bV5SizeImage = rsc->slices[level].stride * height;
+
+        if (!SetDIBitsToDevice(winsys_drawable_handle,
+                               0, 0, width, height,
+                               0, 0, 0, height,
+                              pixels, (const BITMAPINFO *)&bitmap,
+                              DIB_RGB_COLORS)) {
+                StretchDIBits(winsys_drawable_handle,
+                              0, 0, width, height,
+                              0, 0, width, height,
+                              pixels, (const BITMAPINFO *)&bitmap,
+                              DIB_RGB_COLORS, SRCCOPY);
+        }
+}
+#endif
 
 static bool
 vc4_has_feature(struct vc4_screen *screen, uint32_t feature)
@@ -460,9 +697,14 @@ vc4_screen_create(int fd, const struct pipe_screen_config *config,
                   struct renderonly *ro)
 {
         struct vc4_screen *screen = rzalloc(NULL, struct vc4_screen);
+#ifndef USE_VC4_D3DKMT
         uint64_t syncobj_cap = 0;
-        struct pipe_screen *pscreen;
         int err;
+#endif
+        struct pipe_screen *pscreen;
+
+        if (!screen)
+                return NULL;
 
         pscreen = &screen->base;
 
@@ -470,11 +712,15 @@ vc4_screen_create(int fd, const struct pipe_screen_config *config,
         pscreen->get_screen_fd = vc4_screen_get_fd;
         pscreen->context_create = vc4_context_create;
         pscreen->is_format_supported = vc4_screen_is_format_supported;
+#ifdef USE_VC4_D3DKMT
+        pscreen->flush_frontbuffer = vc4_screen_flush_frontbuffer;
+#endif
 
         screen->fd = fd;
         screen->ro = ro;
 
         list_inithead(&screen->bo_cache.time_list);
+        (void) mtx_init(&screen->bo_cache.lock, mtx_plain);
         (void) mtx_init(&screen->bo_handles_mutex, mtx_plain);
         screen->bo_handles = util_hash_table_create_ptr_keys();
 
@@ -489,9 +735,13 @@ vc4_screen_create(int fd, const struct pipe_screen_config *config,
         screen->has_perfmon_ioctl =
                 vc4_has_feature(screen, DRM_VC4_PARAM_SUPPORTS_PERFMON);
 
+#ifdef USE_VC4_D3DKMT
+        screen->has_syncobj = false;
+#else
         err = drmGetCap(fd, DRM_CAP_SYNCOBJ, &syncobj_cap);
         if (err == 0 && syncobj_cap)
                 screen->has_syncobj = true;
+#endif
 
         if (!vc4_get_chip_info(screen))
                 goto fail;
@@ -537,7 +787,10 @@ vc4_screen_create(int fd, const struct pipe_screen_config *config,
         return pscreen;
 
 fail:
+#ifndef USE_VC4_D3DKMT
         close(fd);
+#endif
+        /* The D3DKMT winsys retains fd ownership until creation succeeds. */
         ralloc_free(pscreen);
         return NULL;
 }

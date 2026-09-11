@@ -41,6 +41,51 @@
 #include <asm/ioctl.h>
 typedef unsigned int drm_handle_t;
 
+#elif defined(_WIN32)
+
+#include <stddef.h>
+#include <stdint.h>
+
+typedef int8_t   __s8;
+typedef uint8_t  __u8;
+typedef int16_t  __s16;
+typedef uint16_t __u16;
+typedef int32_t  __s32;
+typedef uint32_t __u32;
+typedef int64_t  __s64;
+typedef uint64_t __u64;
+typedef size_t   __kernel_size_t;
+typedef uintptr_t drm_handle_t;
+
+/*
+ * Windows does not have the Unix ioctl encoding headers.  These request
+ * values never cross the ReactOS kernel boundary: the VC4 D3DKMT winsys
+ * decodes them in user mode and translates the payload to rpi3vc4kmt calls.
+ * Keep the Linux encoding so the existing VC4 UAPI structs and switch cases
+ * remain source-compatible.
+ */
+#define _IOC_NRBITS     8
+#define _IOC_TYPEBITS   8
+#define _IOC_SIZEBITS   14
+#define _IOC_DIRBITS    2
+
+#define _IOC_NRSHIFT    0
+#define _IOC_TYPESHIFT  (_IOC_NRSHIFT + _IOC_NRBITS)
+#define _IOC_SIZESHIFT  (_IOC_TYPESHIFT + _IOC_TYPEBITS)
+#define _IOC_DIRSHIFT   (_IOC_SIZESHIFT + _IOC_SIZEBITS)
+
+#define _IOC_NONE       0U
+#define _IOC_WRITE      1U
+#define _IOC_READ       2U
+
+#define _IOC(dir, type, nr, size) \
+	(((dir) << _IOC_DIRSHIFT) | ((type) << _IOC_TYPESHIFT) | \
+	 ((nr) << _IOC_NRSHIFT) | ((size) << _IOC_SIZESHIFT))
+#define _IO(type, nr)           _IOC(_IOC_NONE, (type), (nr), 0)
+#define _IOR(type, nr, data)    _IOC(_IOC_READ, (type), (nr), sizeof(data))
+#define _IOW(type, nr, data)    _IOC(_IOC_WRITE, (type), (nr), sizeof(data))
+#define _IOWR(type, nr, data)   _IOC(_IOC_READ | _IOC_WRITE, (type), (nr), sizeof(data))
+
 #else /* One of the BSDs or GNU */
 
 #include <stdint.h>
@@ -879,8 +924,13 @@ struct drm_set_client_cap {
 	__u64 value;
 };
 
+#if defined(_WIN32)
+#define DRM_RDWR 0
+#define DRM_CLOEXEC 0
+#else
 #define DRM_RDWR O_RDWR
 #define DRM_CLOEXEC O_CLOEXEC
+#endif
 struct drm_prime_handle {
 	__u32 handle;
 

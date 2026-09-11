@@ -143,6 +143,10 @@ vc4_map_usage_prep(struct pipe_context *pctx,
         if (usage & PIPE_MAP_WRITE) {
                 rsc->writes++;
                 rsc->initialized_buffers = ~0;
+#ifdef USE_VC4_D3DKMT
+                vc4_d3dkmt_bo_mark_cpu_dirty(rsc->bo->screen->fd,
+                                             rsc->bo->handle);
+#endif
         }
 }
 
@@ -288,12 +292,18 @@ static void
 vc4_resource_destroy(struct pipe_screen *pscreen,
                      struct pipe_resource *prsc)
 {
+#ifndef USE_VC4_D3DKMT
         struct vc4_screen *screen = vc4_screen(pscreen);
+#endif
         struct vc4_resource *rsc = vc4_resource(prsc);
         vc4_bo_unreference(&rsc->bo);
 
+#ifdef USE_VC4_D3DKMT
+        assert(!rsc->scanout);
+#else
         if (rsc->scanout)
                 renderonly_scanout_destroy(rsc->scanout, screen->ro);
+#endif
 
         free(rsc);
 }
@@ -316,6 +326,14 @@ vc4_resource_get_handle(struct pipe_screen *pscreen,
                         struct winsys_handle *whandle,
                         unsigned usage)
 {
+#ifdef USE_VC4_D3DKMT
+        (void)pscreen;
+        (void)pctx;
+        (void)prsc;
+        (void)whandle;
+        (void)usage;
+        return false;
+#else
         struct vc4_screen *screen = vc4_screen(pscreen);
         struct vc4_resource *rsc = vc4_resource(prsc);
 
@@ -354,6 +372,7 @@ vc4_resource_get_handle(struct pipe_screen *pscreen,
         }
 
         return false;
+#endif
 }
 
 static bool
@@ -570,6 +589,12 @@ vc4_resource_create_with_modifiers(struct pipe_screen *pscreen,
         if (tmpl->bind & (PIPE_BIND_LINEAR | PIPE_BIND_CURSOR))
                 should_tile = false;
 
+#ifdef USE_VC4_D3DKMT
+        /* WGL presents display targets through a completed linear DIB. */
+        if (tmpl->bind & PIPE_BIND_DISPLAY_TARGET)
+                should_tile = false;
+#endif
+
         /* No shared objects with LT format -- the kernel only has T-format
          * metadata.  LT objects are small enough it's not worth the trouble to
          * give them metadata to tile.
@@ -662,6 +687,7 @@ vc4_resource_from_handle(struct pipe_screen *pscreen,
                          struct winsys_handle *whandle,
                          unsigned usage)
 {
+        (void)usage;
         struct vc4_screen *screen = vc4_screen(pscreen);
         struct vc4_resource *rsc = vc4_resource_setup(pscreen, tmpl);
         struct pipe_resource *prsc = &rsc->base;
@@ -672,10 +698,12 @@ vc4_resource_from_handle(struct pipe_screen *pscreen,
 
         switch (whandle->type) {
         case WINSYS_HANDLE_TYPE_SHARED:
-                rsc->bo = vc4_bo_open_name(screen, whandle->handle);
+                rsc->bo = vc4_bo_open_name(screen,
+                                           (uint32_t)(uintptr_t)whandle->handle);
                 break;
         case WINSYS_HANDLE_TYPE_FD:
-                rsc->bo = vc4_bo_open_dmabuf(screen, whandle->handle);
+                rsc->bo = vc4_bo_open_dmabuf(screen,
+                                             (int)(intptr_t)whandle->handle);
                 break;
         default:
                 mesa_logw("Attempt to import unsupported handle type %d",
@@ -737,6 +765,7 @@ vc4_resource_from_handle(struct pipe_screen *pscreen,
                 }
         }
 
+#ifndef USE_VC4_D3DKMT
         if (screen->ro) {
                 /* Make sure that renderonly has a handle to our buffer in the
                  * display's fd, so that a later renderonly_get_handle()
@@ -747,6 +776,7 @@ vc4_resource_from_handle(struct pipe_screen *pscreen,
                                                                   screen->ro,
                                                                   NULL);
         }
+#endif
 
         if (rsc->tiled && whandle->stride != slice->stride) {
                 mesa_loge_once("Attempting to import %dx%d %s with "

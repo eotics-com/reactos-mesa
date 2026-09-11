@@ -59,7 +59,7 @@ stw_framebuffer_from_hwnd_hdc_locked(HWND hwnd, HDC hdc)
    struct stw_framebuffer *fb;
 
    for (fb = stw_dev->fb_head; fb != NULL; fb = fb->next)
-      if ((hwnd && fb->hWnd == hwnd) || (hdc && fb->hDC == hdc)) {
+      if (hwnd ? fb->hWnd == hwnd : hdc && fb->hDC == hdc) {
          stw_framebuffer_lock(fb);
 
          /* When running with Zink, during the Vulkan surface creation
@@ -350,7 +350,6 @@ stw_framebuffer_create(HDC hdc, HWND hWnd, const struct stw_pixelformat_info *pf
    }
 
    fb->refcnt = 1;
-
    /* A -1 means defer to the global stw_dev->swap_interval */
    fb->swap_interval = -1;
 
@@ -531,7 +530,7 @@ DrvSetPixelFormat(HDC hdc, LONG iPixelFormat)
    if (index >= count)
       return false;
 
-   fb = stw_framebuffer_from_hdc_locked(hdc);
+   fb = stw_framebuffer_from_hdc(hdc);
    if (fb) {
       /*
        * SetPixelFormat must be called only once.  However ignore
@@ -583,8 +582,8 @@ stw_pixelformat_get(HDC hdc)
 }
 
 
-BOOL APIENTRY
-DrvPresentBuffers(HDC hdc, LPPRESENTBUFFERS data)
+static BOOL
+stw_present_buffers(HDC hdc, LPPRESENTBUFFERS data, HANDLE completion_event)
 {
    struct stw_framebuffer *fb;
    struct stw_context *ctx;
@@ -592,7 +591,7 @@ DrvPresentBuffers(HDC hdc, LPPRESENTBUFFERS data)
    struct pipe_context *pipe;
    struct pipe_resource *res;
 
-   if (!stw_dev)
+   if (!stw_dev || !data)
       return false;
 
    fb = stw_framebuffer_from_hdc( hdc );
@@ -617,21 +616,42 @@ DrvPresentBuffers(HDC hdc, LPPRESENTBUFFERS data)
          stw_dev->stw_winsys->shared_surface_open) {
          fb->shared_surface =
             stw_dev->stw_winsys->shared_surface_open(screen,
-                                                     fb->hSharedSurface);
+                                                     fb->hSharedSurface,
+                                                     res,
+                                                     &fb->client_rect);
       }
    }
 
    if (!fb->minimized) {
       if (fb->shared_surface) {
-         stw_dev->stw_winsys->compose(screen,
-                                      res,
-                                      fb->shared_surface,
-                                      &fb->client_rect,
-                                      data->ullPresentToken);
+         if (!stw_dev->stw_winsys->compose(screen,
+                                           pipe,
+                                           res,
+                                           fb->shared_surface,
+                                           &fb->client_rect,
+                                           data->ullPresentToken,
+                                           completion_event)) {
+            stw_framebuffer_update(fb);
+            stw_notify_current_locked(fb);
+            stw_framebuffer_unlock(fb);
+            return false;
+         }
       }
       else {
          stw_dev->stw_winsys->present( screen, pipe, res, hdc );
+         if (completion_event && !SetEvent(completion_event)) {
+            stw_framebuffer_update(fb);
+            stw_notify_current_locked(fb);
+            stw_framebuffer_unlock(fb);
+            return false;
+         }
       }
+   }
+   else if (completion_event && !SetEvent(completion_event)) {
+      stw_framebuffer_update(fb);
+      stw_notify_current_locked(fb);
+      stw_framebuffer_unlock(fb);
+      return false;
    }
 
    stw_framebuffer_update(fb);
@@ -640,6 +660,28 @@ DrvPresentBuffers(HDC hdc, LPPRESENTBUFFERS data)
    stw_framebuffer_unlock(fb);
 
    return true;
+}
+
+BOOL APIENTRY
+DrvPresentBuffers(HDC hdc, LPPRESENTBUFFERS data)
+{
+   return stw_present_buffers(hdc, data, NULL);
+}
+
+BOOL APIENTRY
+DrvPresentBuffers2(HDC hdc, LPPRESENTBUFFERS2 data)
+{
+   PRESENTBUFFERS present;
+
+   if (!data || data->cbSize != sizeof(*data) ||
+       data->nVersion != PRESENTBUFFERS2_VERSION)
+      return false;
+
+   present.hSurface = data->hSurface;
+   present.luidAdapter = data->luidAdapter;
+   present.ullPresentToken = data->ullPresentToken;
+   present.pPrivData = data->pPrivData;
+   return stw_present_buffers(hdc, &present, data->hCompletionEvent);
 }
 
 
@@ -669,10 +711,11 @@ stw_framebuffer_present_locked(HDC hdc,
       PRESENTBUFFERSCB data;
 
       memset(&data, 0, sizeof data);
-      data.nVersion = 2;
+      data.nVersion = 3;
       data.syncType = PRESCB_SYNCTYPE_NONE;
       data.luidAdapter = stw_dev->AdapterLuid;
-      data.updateRect = fb->client_rect;
+      data.updateRect.right = fb->width;
+      data.updateRect.bottom = fb->height;
       data.pPrivData = (void *)res;
 
       stw_notify_current_locked(fb);

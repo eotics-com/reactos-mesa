@@ -428,7 +428,10 @@ stw_st_flush(struct st_context *st,
    args.stwfb = stwfb;
    args.flags = flags;
 
-   if (flags & ST_FLUSH_END_OF_FRAME && !stwfb->fb->winsys_framebuffer)
+   if ((flags & ST_FLUSH_END_OF_FRAME) &&
+       !stwfb->fb->winsys_framebuffer &&
+       !(stw_dev->callbacks.pfnPresentBuffers &&
+         stw_dev->stw_winsys->compose))
       flags |= ST_FLUSH_WAIT;
 
    if (flags & ST_FLUSH_WAIT)

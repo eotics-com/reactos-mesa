@@ -25,6 +25,7 @@
 #define VC4_CL_DUMP_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 void vc4_dump_cli(void *cl, uint32_t size, bool is_render);
 

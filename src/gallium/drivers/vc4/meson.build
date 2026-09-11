@@ -3,11 +3,7 @@
 
 files_libvc4 = files(
   'kernel/vc4_drv.h',
-  'kernel/vc4_gem.c',
   'kernel/vc4_packet.h',
-  'kernel/vc4_render_cl.c',
-  'kernel/vc4_validate.c',
-  'kernel/vc4_validate_shaders.c',
   'vc4_blit.c',
   'vc4_bufmgr.c',
   'vc4_bufmgr.h',
@@ -55,7 +51,6 @@ files_libvc4 = files(
   'vc4_resource.h',
   'vc4_screen.c',
   'vc4_screen.h',
-  'vc4_simulator.c',
   'vc4_simulator_validate.h',
   'vc4_state.c',
   'vc4_tiling.c',
@@ -66,10 +61,26 @@ files_libvc4 = files(
 
 vc4_c_args = []
 
+if with_platform_windows
+  vc4_c_args += '-DUSE_VC4_D3DKMT'
+else
+  files_libvc4 += files(
+    'kernel/vc4_gem.c',
+    'kernel/vc4_render_cl.c',
+    'kernel/vc4_validate.c',
+    'kernel/vc4_validate_shaders.c',
+    'vc4_simulator.c',
+  )
+endif
+
 vc4_deps = [
-  dep_simpenrose, dep_libdrm, dep_valgrind,
-  idep_nir_headers, idep_mesautil,
+  dep_valgrind,
+  idep_nir_headers, idep_mesautil, vc4_winsys_deps,
 ]
+
+if not with_platform_windows
+  vc4_deps += [dep_simpenrose, dep_libdrm]
+endif
 
 libvc4_neon = []
 if host_machine.cpu_family() == 'arm'
@@ -84,7 +95,7 @@ if host_machine.cpu_family() == 'arm'
   )
 endif
 
-if dep_simpenrose.found()
+if not with_platform_windows and dep_simpenrose.found()
   vc4_c_args += '-DUSE_VC4_SIMULATOR'
 endif
 
@@ -93,7 +104,7 @@ libvc4 = static_library(
   [files_libvc4, v3d_xml_pack],
   include_directories : [
     inc_src, inc_include, inc_gallium, inc_gallium_aux, inc_broadcom,
-    inc_gallium_drivers,
+    inc_gallium_drivers, inc_gallium_winsys,
   ],
   link_with: libvc4_neon,
   c_args : [vc4_c_args],
@@ -105,5 +116,5 @@ libvc4 = static_library(
 driver_vc4 = declare_dependency(
   compile_args : '-DGALLIUM_VC4',
   link_with : [libvc4, libvc4winsys, libbroadcom_cle, libbroadcom_v3d],
-  dependencies : idep_nir,
+  dependencies : [idep_nir, vc4_winsys_deps],
 )

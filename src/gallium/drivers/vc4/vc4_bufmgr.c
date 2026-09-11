@@ -22,17 +22,19 @@
  */
 
 #include <errno.h>
-#include <err.h>
+#ifndef USE_VC4_D3DKMT
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+#endif
 
 #include "util/perf/cpu_trace.h"
 #include "util/u_hash_table.h"
 #include "util/u_memory.h"
 #include "util/u_string.h"
 #include "util/ralloc.h"
+#include "util/os_time.h"
 
 #include "vc4_context.h"
 #include "vc4_screen.h"
@@ -96,9 +98,8 @@ vc4_bo_dump_stats(struct vc4_screen *screen)
                 mesa_logd("  oldest cache time: %ld", (long)first->free_time);
                 mesa_logd("  newest cache time: %ld", (long)last->free_time);
 
-                struct timespec time;
-                clock_gettime(CLOCK_MONOTONIC, &time);
-                mesa_logd("  now:               %jd", (intmax_t)time.tv_sec);
+                mesa_logd("  now:               %jd",
+                        (intmax_t)(os_time_get() / 1000000));
         }
 }
 
@@ -144,6 +145,7 @@ vc4_bo_free(struct vc4_bo *bo)
         struct vc4_screen *screen = bo->screen;
 
         if (bo->map) {
+#ifndef USE_VC4_D3DKMT
 #ifdef USE_VC4_SIMULATOR
                 if (bo->name &&
                     strcmp(bo->name, "winsys") == 0) {
@@ -154,6 +156,7 @@ vc4_bo_free(struct vc4_bo *bo)
                         munmap(bo->map, bo->size);
                         VG(VALGRIND_FREELIKE_BLOCK(bo->map, 0));
                 }
+#endif
         }
 
         struct drm_gem_close c;
@@ -284,10 +287,9 @@ vc4_bo_last_unreference(struct vc4_bo *bo)
 {
         struct vc4_screen *screen = bo->screen;
 
-        struct timespec time;
-        clock_gettime(CLOCK_MONOTONIC, &time);
         mtx_lock(&screen->bo_cache.lock);
-        vc4_bo_last_unreference_locked_timed(bo, time.tv_sec);
+        vc4_bo_last_unreference_locked_timed(
+                bo, (time_t)(os_time_get() / 1000000));
         mtx_unlock(&screen->bo_cache.lock);
 }
 
@@ -409,6 +411,8 @@ vc4_bo_open_handle(struct vc4_screen *screen,
 #endif
 
         _mesa_hash_table_insert(screen->bo_handles, (void *)(uintptr_t)handle, bo);
+        screen->bo_count++;
+        screen->bo_size += bo->size;
 
 done:
         mtx_unlock(&screen->bo_handles_mutex);
@@ -438,6 +442,12 @@ vc4_bo_open_name(struct vc4_screen *screen, uint32_t name)
 struct vc4_bo *
 vc4_bo_open_dmabuf(struct vc4_screen *screen, int fd)
 {
+#ifdef USE_VC4_D3DKMT
+        (void)screen;
+        (void)fd;
+        errno = ENOTSUP;
+        return NULL;
+#else
         uint32_t handle;
 
         mtx_lock(&screen->bo_handles_mutex);
@@ -459,11 +469,17 @@ vc4_bo_open_dmabuf(struct vc4_screen *screen, int fd)
         }
 
         return vc4_bo_open_handle(screen, handle, size);
+#endif
 }
 
 int
 vc4_bo_get_dmabuf(struct vc4_bo *bo)
 {
+#ifdef USE_VC4_D3DKMT
+        (void)bo;
+        errno = ENOTSUP;
+        return -1;
+#else
         int fd;
         int ret = drmPrimeHandleToFD(bo->screen->fd, bo->handle,
                                      DRM_CLOEXEC | DRM_RDWR, &fd);
@@ -479,6 +495,7 @@ vc4_bo_get_dmabuf(struct vc4_bo *bo)
         mtx_unlock(&bo->screen->bo_handles_mutex);
 
         return fd;
+#endif
 }
 
 struct vc4_bo *
@@ -627,6 +644,16 @@ vc4_bo_wait(struct vc4_bo *bo, uint64_t timeout_ns, const char *reason)
 void *
 vc4_bo_map_unsynchronized(struct vc4_bo *bo)
 {
+#ifdef USE_VC4_D3DKMT
+        if (!bo->map) {
+                bo->map = vc4_d3dkmt_bo_map(bo->screen->fd, bo->handle);
+        }
+        if (!bo->map) {
+                fprintf(stderr, "D3DKMT map of bo %d failed\n", bo->handle);
+                abort();
+        }
+        return bo->map;
+#else
         uint64_t offset;
         int ret;
 
@@ -653,6 +680,7 @@ vc4_bo_map_unsynchronized(struct vc4_bo *bo)
         VG(VALGRIND_MALLOCLIKE_BLOCK(bo->map, bo->size, 0, false));
 
         return bo->map;
+#endif
 }
 
 void *

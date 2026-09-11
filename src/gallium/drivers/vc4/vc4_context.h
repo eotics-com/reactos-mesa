@@ -32,7 +32,9 @@
 #include "util/u_framebuffer.h"
 #include "util/slab.h"
 #include "util/u_debug_cb.h"
+#ifndef USE_VC4_D3DKMT
 #include "xf86drm.h"
+#endif
 
 #define __user
 #include "drm-uapi/vc4_drm.h"
@@ -476,10 +478,16 @@ int vc4_simulator_ioctl(int fd, unsigned long request, void *arg);
 void vc4_simulator_open_from_handle(int fd, int handle, uint32_t size);
 uint32_t vc4_simulator_get_raster_stride_align(int fd);
 
+#ifdef USE_VC4_D3DKMT
+#include "vc4/d3dkmt/vc4_d3dkmt_public.h"
+#endif
+
 static inline int
 vc4_ioctl(int fd, unsigned long request, void *arg)
 {
-#ifdef USE_VC4_SIMULATOR
+#ifdef USE_VC4_D3DKMT
+        return vc4_d3dkmt_ioctl(fd, request, arg);
+#elif defined(USE_VC4_SIMULATOR)
         return vc4_simulator_ioctl(fd, request, arg);
 #else
         return drmIoctl(fd, request, arg);

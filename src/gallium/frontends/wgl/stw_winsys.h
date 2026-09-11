@@ -99,7 +99,9 @@ struct stw_winsys
     */
    struct stw_shared_surface *
    (*shared_surface_open)(struct pipe_screen *screen,
-                          HANDLE hSharedSurface);
+                          HANDLE hSharedSurface,
+                          struct pipe_resource *source,
+                          LPCRECT rect);
 
    /**
     * Close a shared surface (optional).
@@ -115,12 +117,14 @@ struct stw_winsys
     *
     * @sa GLPRESENTBUFFERSDATA::PresentHistoryToken.
     */
-   void
+   bool
    (*compose)( struct pipe_screen *screen,
+               struct pipe_context *context,
                struct pipe_resource *res,
                struct stw_shared_surface *dest,
                LPCRECT pRect,
-               ULONGLONG PresentHistoryToken );
+               ULONGLONG PresentHistoryToken,
+               HANDLE CompletionEvent );
 
    /**
     * Create a winsys-specific object for a given DC's framebuffer

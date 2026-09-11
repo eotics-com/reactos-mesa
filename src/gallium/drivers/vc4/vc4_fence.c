@@ -34,7 +34,9 @@
  * fired off as our fence marker.
  */
 
+#ifndef USE_VC4_D3DKMT
 #include <libsync.h>
+#endif
 #include <fcntl.h>
 
 #include "util/os_file.h"
@@ -68,8 +70,10 @@ vc4_fence_reference(struct pipe_screen *pscreen,
 
         if (pipe_reference(old ? &old->reference : NULL,
                            f ?  &f->reference : NULL)) {
+#ifndef USE_VC4_D3DKMT
                 if (old->fd >= 0)
                         close(old->fd);
+#endif
                 free(old);
         }
         *p = f;
@@ -86,8 +90,13 @@ vc4_fence_finish(struct pipe_screen *pscreen,
 
         MESA_TRACE_FUNC();
 
-        if (f->fd >= 0)
+        if (f->fd >= 0) {
+#ifdef USE_VC4_D3DKMT
+                return false;
+#else
                 return sync_wait(f->fd, timeout_ns / 1000000) == 0;
+#endif
+        }
 
         return vc4_wait_seqno(screen, f->seqno, timeout_ns, "fence wait");
 }
@@ -130,33 +139,49 @@ vc4_fence_server_sync(struct pipe_context *pctx,
 
         MESA_TRACE_FUNC();
 
+#ifdef USE_VC4_D3DKMT
+        (void)vc4;
+        (void)fence;
+#else
         if (fence->fd >= 0)
                 sync_accumulate("vc4", &vc4->in_fence_fd, fence->fd);
+#endif
 }
 
 static int
 vc4_fence_get_fd(struct pipe_screen *screen, struct pipe_fence_handle *pfence)
 {
-        struct vc4_fence *fence = vc4_fence(pfence);
-
         MESA_TRACE_FUNC();
 
+#ifdef USE_VC4_D3DKMT
+        (void)pfence;
+        return -1;
+#else
+        struct vc4_fence *fence = vc4_fence(pfence);
+
         return os_dupfd_cloexec(fence->fd);
+#endif
 }
 
 int
 vc4_fence_context_init(struct vc4_context *vc4)
 {
+#ifndef USE_VC4_D3DKMT
         vc4->base.create_fence_fd = vc4_fence_create_fd;
         vc4->base.fence_server_sync = vc4_fence_server_sync;
+#endif
         vc4->in_fence_fd = -1;
 
         /* Since we initialize the in_fence_fd to -1 (no wait necessary),
          * we also need to initialize our in_syncobj as signaled.
          */
         if (vc4->screen->has_syncobj) {
+#ifdef USE_VC4_D3DKMT
+                return -1;
+#else
                 return drmSyncobjCreate(vc4->fd, DRM_SYNCOBJ_CREATE_SIGNALED,
                                         &vc4->in_syncobj);
+#endif
         } else {
                 return 0;
         }

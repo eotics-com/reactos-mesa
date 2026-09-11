@@ -1787,9 +1787,27 @@ else
 endif
 
 # IMPORTANT: We can't upgrade Zlib beyond 1.2.5 because it would break Viewperf.
-dep_zlib = dependency('zlib', version : '>= 1.2.3',
-                      allow_fallback: true,
-                      required : get_option('zlib'))
+reactos_source_dir = get_option('reactos-source-dir')
+reactos_build_dir = get_option('reactos-build-dir')
+if (with_platform_windows and with_gallium_vc4 and not get_option('zlib').disabled() and
+    reactos_source_dir != '' and reactos_build_dir != '')
+  dep_reactos_zlib = cc.find_library(
+    'zlib',
+    dirs : reactos_build_dir / 'sdk/lib/3rdparty/zlib',
+    required : get_option('zlib'),
+    static : true,
+  )
+  dep_zlib = declare_dependency(
+    dependencies : dep_reactos_zlib,
+    include_directories : include_directories(
+      reactos_source_dir / 'sdk/include/reactos/libs/zlib',
+    ),
+  )
+else
+  dep_zlib = dependency('zlib', version : '>= 1.2.3',
+                        allow_fallback: true,
+                        required : get_option('zlib'))
+endif
 if dep_zlib.found()
   pre_args += '-DHAVE_ZLIB'
 endif

@@ -26,7 +26,9 @@
  * Functions for submitting VC4 render jobs to the kernel.
  */
 
+#ifndef USE_VC4_D3DKMT
 #include <xf86drm.h>
+#endif
 #include "vc4_cl_dump.h"
 #include "vc4_context.h"
 #include "util/hash_table.h"
@@ -504,6 +506,7 @@ vc4_job_submit(struct vc4_context *vc4, struct vc4_job *job)
         submit.flags |= job->flags;
 
         if (vc4->screen->has_syncobj) {
+#ifndef USE_VC4_D3DKMT
                 submit.out_sync = vc4->job_syncobj;
 
                 if (vc4->in_fence_fd >= 0) {
@@ -514,6 +517,7 @@ vc4_job_submit(struct vc4_context *vc4, struct vc4_job *job)
                         close(vc4->in_fence_fd);
                         vc4->in_fence_fd = -1;
                 }
+#endif
         }
 
         if (!VC4_DBG(NORAST)) {
@@ -574,6 +578,7 @@ vc4_job_init(struct vc4_context *vc4)
                                                   _mesa_key_pointer_equal);
 
         if (vc4->screen->has_syncobj) {
+#ifndef USE_VC4_D3DKMT
                 /* Create the syncobj as signaled since with no job executed
                  * there is nothing to wait on.
                  */
@@ -588,6 +593,7 @@ vc4_job_init(struct vc4_context *vc4)
                          */
                         return ret;
                 }
+#endif
         }
 
         return 0;

@@ -105,7 +105,11 @@ renderonly_get_handle(struct renderonly_scanout *scanout,
       return false;
 
    assert(handle->type == WINSYS_HANDLE_TYPE_KMS);
+#ifdef _WIN32
+   handle->handle = (HANDLE)(uintptr_t)scanout->handle;
+#else
    handle->handle = scanout->handle;
+#endif
    handle->stride = scanout->stride;
 
    return true;

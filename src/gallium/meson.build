@@ -108,7 +108,12 @@ else
   driver_freedreno = declare_dependency()
 endif
 if with_gallium_vc4
-  subdir('winsys/vc4/drm')
+  vc4_winsys_deps = []
+  if with_platform_windows
+    subdir('winsys/vc4/d3dkmt')
+  else
+    subdir('winsys/vc4/drm')
+  endif
   subdir('drivers/vc4')
 else
   driver_vc4 = declare_dependency()

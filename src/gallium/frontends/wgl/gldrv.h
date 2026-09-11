@@ -514,12 +514,25 @@ typedef struct _PRESENTBUFFERS {
     IN ULONGLONG ullPresentToken;
     IN LPVOID pPrivData;
 } PRESENTBUFFERS, *LPPRESENTBUFFERS;
+
+#define PRESENTBUFFERS2_VERSION 1
+
+typedef struct _PRESENTBUFFERS2 {
+    IN UINT cbSize;
+    IN UINT nVersion;
+    IN HANDLE hSurface;
+    IN LUID luidAdapter;
+    IN ULONGLONG ullPresentToken;
+    IN LPVOID pPrivData;
+    IN HANDLE hCompletionEvent;
+} PRESENTBUFFERS2, *LPPRESENTBUFFERS2;
 typedef BOOL (APIENTRY *PFN_PRESENTBUFFERS)(HDC hdc, LPPRESENTBUFFERSCB pprsbcbData);
 
 #define PRESCB_SYNCTYPE_NONE 0
 #define PRESCB_SYNCTYPE_VSYNC  1
 
 BOOL            APIENTRY DrvPresentBuffers(HDC hdc, LPPRESENTBUFFERS pprsbData);
+BOOL            APIENTRY DrvPresentBuffers2(HDC hdc, LPPRESENTBUFFERS2 pprsbData);
 
 #endif
 

@@ -31,6 +31,8 @@
 
 #if USE_V3D_SIMULATOR
 #  include "simulator/v3d_simulator.h"
+#elif defined(_WIN32)
+#  include "common/v3d_d3dkmt.h"
 #else
 #  include "xf86drm.h"
 #endif

@@ -8,6 +8,7 @@ DrvDescribePixelFormat@16
 DrvGetLayerPaletteEntries@20
 DrvGetProcAddress@4
 DrvPresentBuffers@8
+DrvPresentBuffers2@8
 DrvRealizeLayerPalette@12
 DrvReleaseContext@4
 DrvSetCallbackProcs@8
