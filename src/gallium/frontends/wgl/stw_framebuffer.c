@@ -59,7 +59,13 @@ stw_framebuffer_from_hwnd_hdc_locked(HWND hwnd, HDC hdc)
    struct stw_framebuffer *fb;
 
    for (fb = stw_dev->fb_head; fb != NULL; fb = fb->next)
+#ifdef __REACTOS__
+      /* A cached window DC can be reassigned; only offscreen framebuffers
+       * use HDC identity when there is no HWND. */
+      if (hwnd ? fb->hWnd == hwnd : (!fb->hWnd && hdc && fb->hDC == hdc)) {
+#else
       if (hwnd ? fb->hWnd == hwnd : hdc && fb->hDC == hdc) {
+#endif
          stw_framebuffer_lock(fb);
 
          /* When running with Zink, during the Vulkan surface creation
