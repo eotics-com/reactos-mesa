@@ -47,6 +47,24 @@
 #include "stw_st.h"
 #include "main/errors.h"
 
+#ifdef HAVE_ROS_SHARED_TEXTURE
+#include "dwmpresenttracecore.h"
+/* Share the winsys counter bank so one frozen capture covers WGL and VC4.
+ * An inactive bank does not read a clock or modify a counter. */
+static DPT_SCOPE
+stw_trace_begin(ULONG metric)
+{
+   DPT_SCOPE inactive = {0};
+   DPT_BANK *bank = stw_dev->stw_winsys->presentation_trace_bank;
+   return bank ? DptBegin(bank, metric) : inactive;
+}
+#define STW_TRACE_BEGIN(name, metric) DPT_SCOPE name = stw_trace_begin(metric)
+#define STW_TRACE_END(name, ok) DptEnd(stw_dev->stw_winsys->presentation_trace_bank, name, ok, 0)
+#else
+#define STW_TRACE_BEGIN(name, metric) do {} while (0)
+#define STW_TRACE_END(name, ok) do {} while (0)
+#endif
+
 /* Vendor-owned synchronous callback payload. opengl32 only returns this
  * opaque pointer; no public callback structure or token layout is extended. */
 struct stw_present_private {
@@ -681,13 +699,16 @@ stw_present_buffers(HDC hdc, LPPRESENTBUFFERS data, HANDLE completion_event)
 
    if (!fb->minimized) {
       if (fb->shared_surface) {
-         if (!stw_dev->stw_winsys->compose(screen,
+         STW_TRACE_BEGIN(trace, DPT_SHARED_COMPOSE);
+         BOOL composed = stw_dev->stw_winsys->compose(screen,
                                            pipe,
                                            res,
                                            fb->shared_surface,
                                            &fb->client_rect,
                                            data->ullPresentToken,
-                                           completion_event)) {
+                                           completion_event);
+         STW_TRACE_END(trace, composed);
+         if (!composed) {
             stw_framebuffer_update(fb);
             stw_notify_current_locked(fb);
             stw_framebuffer_unlock(fb);
@@ -787,7 +808,10 @@ stw_framebuffer_present_locked(HDC hdc,
       stw_notify_current_locked(fb);
       stw_framebuffer_unlock(fb);
 
-      return stw_dev->callbacks.pfnPresentBuffers(hdc, &data);
+      STW_TRACE_BEGIN(trace, DPT_WGL_CALLBACK);
+      BOOL result = stw_dev->callbacks.pfnPresentBuffers(hdc, &data);
+      STW_TRACE_END(trace, result);
+      return result;
    }
    else {
       struct pipe_screen *screen = stw_dev->screen;
@@ -864,13 +888,17 @@ stw_framebuffer_swap_locked(HDC hdc, struct stw_framebuffer *fb)
 
       if (ctx->current_framebuffer == fb) {
          /* flush current context */
+         STW_TRACE_BEGIN(trace, DPT_WGL_FLUSH);
          stw_st_flush(ctx->st, fb->drawable, ST_FLUSH_END_OF_FRAME);
+         STW_TRACE_END(trace, TRUE);
       }
    }
 
    int interval = fb->swap_interval == -1 ? stw_dev->swap_interval : fb->swap_interval;
    if (interval != 0 && !fb->winsys_framebuffer) {
+      STW_TRACE_BEGIN(trace, DPT_WGL_PACE);
       wait_swap_interval(fb, interval);
+      STW_TRACE_END(trace, TRUE);
    }
 
    return stw_st_swap_framebuffer_locked(ctx ? ctx->st : NULL, hdc, fb->drawable);

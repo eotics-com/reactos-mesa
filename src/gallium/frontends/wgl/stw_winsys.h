@@ -141,6 +141,7 @@ struct stw_winsys
    (*get_name)(void);
 
    BOOL (*presentation_trace)(const void *request, void *output, ULONG bytes);
+   struct _DPT_BANK *presentation_trace_bank;
 
    /* Optional internal callback; public PRESENTBUFFERS layouts are unchanged. */
    void (*present_region)(struct pipe_screen *screen,

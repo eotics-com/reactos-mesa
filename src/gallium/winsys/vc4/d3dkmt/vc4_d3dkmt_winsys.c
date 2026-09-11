@@ -295,9 +295,12 @@ vc4_d3dkmt_wait_fence_locked(struct vc4_d3dkmt_device *device,
                              const RPI3VC4KMT_FENCE *fence,
                              uint64_t timeout_ns)
 {
+   DPT_SCOPE trace = DptBegin(&vc4_present_trace, DPT_BO_WAIT);
    rpi3vc4kmt_status status =
       rpi3vc4kmt_wait(device->kmt, fence,
                       vc4_d3dkmt_timeout_ms(timeout_ns));
+   DptEnd(&vc4_present_trace, trace,
+          status >= 0 || status == VC4_D3DKMT_STATUS_IO_TIMEOUT, 0);
    if (status >= 0)
       return 0;
    errno = status == VC4_D3DKMT_STATUS_IO_TIMEOUT ? ETIME : EIO;

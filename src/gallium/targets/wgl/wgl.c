@@ -432,7 +432,9 @@ static const struct stw_winsys stw_winsys = {
    &wgl_get_name,
 #ifdef GALLIUM_VC4
    &vc4_d3dkmt_trace_control,
+   &vc4_present_trace,
 #else
+   NULL,
    NULL,
 #endif
    &wgl_present_region,
