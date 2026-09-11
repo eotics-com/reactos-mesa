@@ -102,7 +102,7 @@ v3d_load_utile(void *cpu, uint32_t cpu_stride,
                         "st1 {v3.D}[1], [%[cpu]]\n"
                         : [cpu]         "+&r"(cpu)
                         : [gpu]         "r"(gpu),
-                          [cpu_stride]  "r"(cpu_stride)
+                          [cpu_stride]  "r"((uintptr_t)cpu_stride)
                         : "v0", "v1", "v2", "v3", "memory");
                 return;
         } else if (gpu_stride == 16) {
@@ -129,7 +129,7 @@ v3d_load_utile(void *cpu, uint32_t cpu_stride,
                         : [cpu]         "+&r"(cpu),
                           [cpu2]        "+&r"(cpu2)
                         : [gpu]         "r"(gpu),
-                          [cpu_stride]  "r"(cpu_stride)
+                          [cpu_stride]  "r"((uintptr_t)cpu_stride)
                         : "v0", "v1", "v2", "v3", "memory");
                 return;
         }
@@ -210,7 +210,7 @@ v3d_store_utile(void *gpu, uint32_t gpu_stride,
                         "st1 {v0.2d, v1.2d, v2.2d, v3.2d}, [%[gpu]]\n"
                         : [cpu]         "+r"(cpu)
                         : [gpu]         "r"(gpu),
-                          [cpu_stride]  "r"(cpu_stride)
+                          [cpu_stride]  "r"((uintptr_t)cpu_stride)
                         : "v0", "v1", "v2", "v3");
                 return;
         } else if (gpu_stride == 16) {
@@ -233,7 +233,7 @@ v3d_store_utile(void *gpu, uint32_t gpu_stride,
                         : [cpu]         "+r"(cpu),
                           [cpu2]        "+r"(cpu2)
                         : [gpu]         "r"(gpu),
-                          [cpu_stride]  "r"(cpu_stride)
+                          [cpu_stride]  "r"((uintptr_t)cpu_stride)
                         : "v0", "v1", "v2", "v3");
                 return;
         }

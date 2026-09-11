@@ -46,6 +46,17 @@ by the old fork, so those obsolete hunks are not replayed. Its separate,
 size/version-checked ``DrvPresentBuffers2`` interface is retained;
 legacy callers never supply or expose trailing event fields.
 
+A separate compiler-compatibility follow-up widens the four ARM64 assembly
+stride operands to ``uintptr_t``. This gives the post-index addressing
+instructions an explicitly zero-extended, 64-bit register value instead of
+passing a 32-bit C operand to an X-register use.
+
+Focused checks passed: 7,488 byte-copy/canary cases on the ARM64 macOS host,
+strict Windows ARM64 compilation of that probe, and ARM64/AMD64 compile-time
+checks of the 32-byte legacy and 48-byte sized WGL present layouts. These
+are CPU/compiler/ABI checks, not Windows or ReactOS rendering tests and
+not a Cortex-A53 non-cacheable-memory performance measurement.
+
 Build and validation boundary
 -----------------------------
 
