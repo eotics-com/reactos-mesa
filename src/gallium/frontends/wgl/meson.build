@@ -2,6 +2,12 @@
 # SPDX-License-Identifier: MIT
 
 inc_wgl = include_directories('.')
+ros_interop_includes = []
+ros_interop_args = []
+if reactos_source_dir != '' and with_gallium_vc4
+  ros_interop_includes += include_directories(reactos_source_dir / 'sdk/include/reactos')
+  ros_interop_args += '-DHAVE_ROS_SHARED_TEXTURE'
+endif
 
 _wgl_deps = [idep_xmlconfig, driver_zink, idep_mesautilformat]
 if with_gallium_zink
@@ -35,10 +41,10 @@ endif
 libwgl = static_library(
   'wgl',
   files_libwgl,
-  c_args : [
+  c_args : ros_interop_args + [
     '-D_GDI32_',             # prevent wgl* being declared __declspec(dllimport)
   ],
-  include_directories : [
+  include_directories : ros_interop_includes + [
     inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_mesa,
   ],
   dependencies : _wgl_deps,

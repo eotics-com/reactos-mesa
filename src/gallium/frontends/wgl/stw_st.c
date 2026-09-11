@@ -219,6 +219,17 @@ stw_st_framebuffer_validate_locked(struct st_context *st,
                 PIPE_BIND_SAMPLER_VIEW |
                 PIPE_BIND_RENDER_TARGET;
 
+#ifdef HAVE_ROS_SHARED_TEXTURE
+         /* The DWM carrier is presented by the GPU into the shared primary.
+          * Its render buffer is never exposed as a linear GDI DIB. Allow VC4
+          * tiling here so framebuffer captures can sample it directly rather
+          * than allocate and convert a full-screen raster sampler shadow for
+          * each glass region. The imported scanout allocation stays linear. */
+         if (stwfb->fb->hWnd &&
+             GetPropW(stwfb->fb->hWnd, L"ReactOS.Dwm.GpuOutput"))
+            bind &= ~PIPE_BIND_DISPLAY_TARGET;
+#endif
+
 #ifdef GALLIUM_ZINK
          if (stw_dev->zink) {
             /* Covers the case where we have already created a drawable that
@@ -448,7 +459,7 @@ stw_st_flush(struct st_context *st,
 static bool
 stw_st_framebuffer_present_locked(HDC hdc,
                                   struct pipe_frontend_drawable *drawable,
-                                  enum st_attachment_type statt)
+                                  enum st_attachment_type statt, bool swapping)
 {
    struct stw_st_framebuffer *stwfb = stw_st_framebuffer(drawable);
    struct pipe_resource *resource;
@@ -458,9 +469,11 @@ stw_st_framebuffer_present_locked(HDC hdc,
    resource = stwfb->textures[statt];
    bool ret = false;
    if (resource) {
-      ret = stw_framebuffer_present_locked(hdc, stwfb->fb, resource);
+      ret = stw_framebuffer_present_locked(hdc, stwfb->fb, resource, swapping);
    }
    else {
+      if (swapping)
+         stwfb->fb->swap_hint_valid = false;
       stw_framebuffer_unlock(stwfb->fb);
    }
 
@@ -512,7 +525,7 @@ stw_st_framebuffer_flush_front(struct st_context *st,
 
    hDC = GetDC(stwfb->fb->hWnd);
 
-   ret = stw_st_framebuffer_present_locked(hDC, &stwfb->base, flush_statt);
+   ret = stw_st_framebuffer_present_locked(hDC, &stwfb->base, flush_statt, false);
 
    ReleaseDC(stwfb->fb->hWnd, hDC);
 
@@ -587,7 +600,7 @@ stw_st_swap_framebuffer_locked(struct st_context *st,
    struct pipe_resource *ptex;
    unsigned mask;
 
-   bool ret = stw_st_framebuffer_present_locked(hdc, &stwfb->base, back);
+   bool ret = stw_st_framebuffer_present_locked(hdc, &stwfb->base, back, true);
    if (!ret)
       return false;
 

@@ -26,6 +26,81 @@
 
 #include "stw_context.h"
 #include "stw_device.h"
+#ifdef HAVE_ROS_SHARED_TEXTURE
+#include "dwmgpuinterop.h"
+#include "stw_winsys.h"
+#include "state_tracker/st_context.h"
+#include "main/texobj.h"
+#include "pipe/p_screen.h"
+#include "util/u_inlines.h"
+#include "frontend/winsys_handle.h"
+#include "drm-uapi/drm_fourcc.h"
+
+BOOL WINAPI
+wglBindSharedTextureROS(UINT version, UINT share, UINT width, UINT height,
+                       UINT pitch, UINT format)
+{
+   struct stw_context *ctx = stw_current_context();
+   if (!ctx || version != DWM_WGL_SHARED_TEXTURE_VERSION || !share ||
+       !width || !height || width > 4096 || height > 4096 ||
+       format != DWM_WGL_SHARED_BGRA8 || pitch < width * 4 ||
+       pitch != ((width * 4 + 15) & ~15u)) {
+      SetLastError(ERROR_INVALID_PARAMETER);
+      return FALSE;
+   }
+   struct pipe_screen *screen = ctx->st->pipe->screen;
+   /* VC4 cannot sample raster storage directly. Matching this stride allows
+    * its tile-buffer load/store path to tile the shared image on the GPU;
+    * reject other pitches instead of entering a CPU layout conversion. */
+   if (strcmp(screen->get_name(screen), "VC4 V3D 2.1") != 0 ||
+       !screen->resource_from_handle) {
+      SetLastError(ERROR_NOT_SUPPORTED);
+      return FALSE;
+   }
+   struct pipe_resource templ = {0};
+   struct winsys_handle handle = {0};
+   templ.target = PIPE_TEXTURE_2D;
+   templ.format = PIPE_FORMAT_B8G8R8A8_UNORM;
+   templ.width0 = width;
+   templ.height0 = height;
+   templ.depth0 = templ.array_size = 1;
+   templ.bind = PIPE_BIND_SAMPLER_VIEW;
+   handle.type = WINSYS_HANDLE_TYPE_SHARED;
+   handle.handle = (HANDLE)(uintptr_t)share;
+   handle.stride = pitch;
+   handle.modifier = DRM_FORMAT_MOD_LINEAR;
+   struct pipe_resource *resource = screen->resource_from_handle(
+       screen, &templ, &handle, PIPE_HANDLE_USAGE_EXPLICIT_FLUSH);
+   if (!resource) {
+      SetLastError(ERROR_INVALID_HANDLE);
+      return FALSE;
+   }
+   bool ok = st_context_teximage(ctx->st, GL_TEXTURE_2D, 0,
+                                 templ.format, resource, false);
+   pipe_resource_reference(&resource, NULL);
+   return ok;
+}
+
+BOOL WINAPI
+wglUpdateSharedTextureROS(UINT version)
+{
+   struct stw_context *ctx = stw_current_context();
+   if (!ctx || version != DWM_WGL_SHARED_TEXTURE_VERSION) {
+      SetLastError(ERROR_INVALID_PARAMETER);
+      return FALSE;
+   }
+   struct gl_texture_object *tex =
+       _mesa_get_current_tex_object(ctx->st->ctx, GL_TEXTURE_2D);
+   struct pipe_screen *screen = ctx->st->pipe->screen;
+   if (!tex || !tex->pt || !screen->resource_changed ||
+       strcmp(screen->get_name(screen), "VC4 V3D 2.1") != 0) {
+      SetLastError(ERROR_NOT_SUPPORTED);
+      return FALSE;
+   }
+   screen->resource_changed(screen, tex->pt);
+   return TRUE;
+}
+#endif
 
 int
 wglMesaGLInteropQueryDeviceInfo(HDC dpy, HGLRC context,

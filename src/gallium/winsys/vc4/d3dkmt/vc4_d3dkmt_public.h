@@ -12,6 +12,11 @@
 
 struct pipe_screen;
 struct pipe_screen_config;
+struct pipe_context;
+struct pipe_blit_info;
+
+bool vc4_render_blit_for_present(struct pipe_context *context,
+                                const struct pipe_blit_info *info);
 
 struct pipe_screen *
 vc4_d3dkmt_screen_create(const struct pipe_screen_config *config);

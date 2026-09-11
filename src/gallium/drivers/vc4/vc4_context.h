@@ -501,6 +501,8 @@ void vc4_write_uniforms(struct vc4_context *vc4,
                         struct vc4_texture_stateobj *texstate);
 
 void vc4_flush(struct pipe_context *pctx);
+bool vc4_render_blit_for_present(struct pipe_context *pctx,
+                                 const struct pipe_blit_info *info);
 int vc4_job_init(struct vc4_context *vc4);
 int vc4_fence_context_init(struct vc4_context *vc4);
 struct vc4_job *vc4_get_job(struct vc4_context *vc4,

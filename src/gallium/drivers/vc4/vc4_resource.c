@@ -690,11 +690,13 @@ vc4_resource_from_handle(struct pipe_screen *pscreen,
         (void)usage;
         struct vc4_screen *screen = vc4_screen(pscreen);
         struct vc4_resource *rsc = vc4_resource_setup(pscreen, tmpl);
-        struct pipe_resource *prsc = &rsc->base;
-        struct vc4_resource_slice *slice = &rsc->slices[0];
+        struct pipe_resource *prsc;
+        struct vc4_resource_slice *slice;
 
         if (!rsc)
                 return NULL;
+        prsc = &rsc->base;
+        slice = &rsc->slices[0];
 
         switch (whandle->type) {
         case WINSYS_HANDLE_TYPE_SHARED:
@@ -787,8 +789,20 @@ vc4_resource_from_handle(struct pipe_screen *pscreen,
                                slice->stride);
                 goto fail;
         } else if (!rsc->tiled) {
+                /* Imported geometry must fit the actual shared allocation,
+                 * including its last row. Never trust a WGL caller's pitch
+                 * or dimensions to describe the KMT backing. */
+                if ((uint64_t)prsc->width0 * rsc->cpp > whandle->stride ||
+                    (uint64_t)slice->offset +
+                        (uint64_t)whandle->stride * prsc->height0 > rsc->bo->size)
+                        goto fail;
                 slice->stride = whandle->stride;
         }
+
+        /* The shared allocation can contain data written outside Mesa and is
+         * also a valid destination for an immediate render job. */
+        rsc->writes = 1;
+        rsc->initialized_buffers = ~0u;
 
         return prsc;
 
@@ -1105,7 +1119,12 @@ vc4_update_shadow_baselevel_texture(struct pipe_context *pctx,
 
         assert(view->texture != pview->texture);
 
-        if (shadow->writes == orig->writes && orig->bo->private)
+        if (shadow->writes == orig->writes &&
+            (orig->bo->private
+#ifdef USE_VC4_D3DKMT
+             || orig->external_updates_tracked
+#endif
+            ))
                 return;
 
         perf_debug("Updating %dx%d@%d shadow texture due to %s\n",
@@ -1218,6 +1237,19 @@ static const struct u_transfer_vtbl transfer_vtbl = {
         .transfer_flush_region    = u_default_transfer_flush_region,
 };
 
+#ifdef USE_VC4_D3DKMT
+static void
+vc4_resource_changed(struct pipe_screen *pscreen, struct pipe_resource *prsc)
+{
+        struct vc4_resource *rsc = vc4_resource(prsc);
+        (void)pscreen;
+        /* This hook is used by the explicit WGL publication bridge. Keep
+         * the BO shared: its ownership and CPU mapping rules do not change. */
+        rsc->external_updates_tracked = true;
+        rsc->writes++;
+}
+#endif
+
 void
 vc4_resource_screen_init(struct pipe_screen *pscreen)
 {
@@ -1230,6 +1262,9 @@ vc4_resource_screen_init(struct pipe_screen *pscreen)
         pscreen->resource_get_handle = vc4_resource_get_handle;
         pscreen->resource_get_param = vc4_resource_get_param;
         pscreen->resource_destroy = vc4_resource_destroy;
+#ifdef USE_VC4_D3DKMT
+        pscreen->resource_changed = vc4_resource_changed;
+#endif
         pscreen->transfer_helper = u_transfer_helper_create(&transfer_vtbl,
                                                             U_TRANSFER_HELPER_MSAA_MAP);
 

@@ -468,6 +468,24 @@ vc4_render_blit(struct pipe_context *ctx, struct pipe_blit_info *info)
         info->mask = 0;
 }
 
+/* The generic blit path first tries util_resource_copy_region(), which maps
+ * linear resources and copies them on the CPU.  A desktop present must issue
+ * a VC4 render job even when both images happen to be linear. */
+bool
+vc4_render_blit_for_present(struct pipe_context *pctx,
+                            const struct pipe_blit_info *blit_info)
+{
+        struct pipe_blit_info info = *blit_info;
+
+        /* Exact-size raster presentation can load/store tiles directly.
+         * Sampling a raster source first builds a complete tiled shadow,
+         * adding a second full-frame GPU conversion to every desktop swap. */
+        vc4_tile_blit(pctx, &info);
+        if (info.mask)
+                vc4_render_blit(pctx, &info);
+        return info.mask == 0;
+}
+
 /* Implement stencil and stencil/depth blit by reinterpreting stencil data as
  * an RGBA8888 texture.
  */
@@ -534,6 +552,37 @@ vc4_stencil_blit(struct pipe_context *ctx, struct pipe_blit_info *info)
         info->mask &= ~PIPE_MASK_ZS;
 }
 
+#ifdef USE_VC4_D3DKMT
+/* Rendering from raster storage creates a tiled sampler shadow. Only admit
+ * layouts whose whole level-zero shadow update is accepted by tile_blit:
+ * identical dimensions/format, single layer/sample, and the raster stride
+ * computed from the destination width. Otherwise that update re-enters this
+ * dispatcher and could recurse or silently map/copy on the CPU.
+ */
+static bool
+vc4_blit_can_sample_on_gpu(const struct pipe_blit_info *info)
+{
+        struct vc4_resource *src = vc4_resource(info->src.resource);
+        const struct pipe_resource *base = info->src.resource;
+
+        if (src->tiled)
+                return true;
+
+        return base->target == PIPE_TEXTURE_2D &&
+               base->depth0 == 1 && base->array_size == 1 &&
+               base->nr_samples <= 1 && base->last_level == 0 &&
+               info->src.level == 0 && info->src.box.z == 0 &&
+               info->src.box.depth == 1 &&
+               base->width0 > 0 && base->width0 <= 2048 &&
+               base->height0 > 0 && base->height0 <= 2048 &&
+               (base->format == PIPE_FORMAT_B8G8R8A8_UNORM ||
+                base->format == PIPE_FORMAT_B8G8R8X8_UNORM) &&
+               src->cpp == 4 &&
+               src->slices[0].tiling == VC4_TILING_FORMAT_LINEAR &&
+               src->slices[0].stride == align(base->width0 * 4, 16);
+}
+#endif
+
 /* Optimal hardware path for blitting pixels.
  * Scaling, format conversion, up- and downsampling (resolve) are allowed.
  */
@@ -547,6 +596,13 @@ vc4_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
         vc4_yuv_blit(pctx, &info);
 
         vc4_tile_blit(pctx, &info);
+
+#ifdef USE_VC4_D3DKMT
+        /* Unaligned glass captures still use GPU rendering. Raster sources
+         * are safe when their sampler shadow can be built by a tile job. */
+        if (info.mask && vc4_blit_can_sample_on_gpu(&info))
+                vc4_render_blit(pctx, &info);
+#endif
 
         if (info.mask &&
             util_try_blit_via_copy_region(pctx, &info, false))

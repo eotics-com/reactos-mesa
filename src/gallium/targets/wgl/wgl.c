@@ -290,7 +290,7 @@ wgl_shared_surface_open(struct pipe_screen *screen,
    struct stw_shared_surface *surface;
    struct pipe_resource templ = { 0 };
    struct winsys_handle whandle = { 0 };
-   unsigned width, height, pitch;
+   unsigned width, height;
 
    if (!screen || !screen->resource_from_handle || !shared_handle ||
        !source || !rect || rect->right <= rect->left ||
@@ -299,13 +299,12 @@ wgl_shared_surface_open(struct pipe_screen *screen,
 
    width = rect->right - rect->left;
    height = rect->bottom - rect->top;
-   pitch = width * 4;
    surface = CALLOC_STRUCT(stw_shared_surface);
    if (!surface)
       return NULL;
 
    templ.target = PIPE_TEXTURE_2D;
-   templ.format = PIPE_FORMAT_B8G8R8A8_UNORM;
+   templ.format = source->format;
    templ.width0 = width;
    templ.height0 = height;
    templ.depth0 = 1;
@@ -314,7 +313,7 @@ wgl_shared_surface_open(struct pipe_screen *screen,
 
    whandle.type = WINSYS_HANDLE_TYPE_SHARED;
    whandle.handle = shared_handle;
-   whandle.stride = pitch;
+   whandle.stride = width * 4;
    whandle.modifier = DRM_FORMAT_MOD_LINEAR;
    surface->resource = screen->resource_from_handle(
       screen, &templ, &whandle, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
@@ -360,8 +359,26 @@ wgl_compose(struct pipe_screen *screen,
    height = MIN2((unsigned)(rect->bottom - rect->top), source->height0);
    height = MIN2(height, dest->resource->height0);
    u_box_2d(0, 0, width, height, &box);
-   context->resource_copy_region(context, dest->resource, 0, 0, 0, 0,
-                                 source, 0, &box);
+#ifdef GALLIUM_VC4
+   if (use_vc4) {
+      struct pipe_blit_info blit = {0};
+
+      /* Copy through the VC4 tile/render path. The completion fence below
+       * still protects publication and reuse of the shared window surface. */
+      blit.src.resource = source;
+      blit.src.format = source->format;
+      blit.src.box = box;
+      blit.dst.resource = dest->resource;
+      blit.dst.format = dest->resource->format;
+      blit.dst.box = box;
+      blit.mask = PIPE_MASK_RGBA;
+      blit.filter = PIPE_TEX_FILTER_NEAREST;
+      if (!vc4_render_blit_for_present(context, &blit))
+         return false;
+   } else
+#endif
+      context->resource_copy_region(context, dest->resource, 0, 0, 0, 0,
+                                    source, 0, &box);
    context->flush(context, &fence, PIPE_FLUSH_END_OF_FRAME);
    if (!fence)
       return false;
@@ -377,6 +394,22 @@ wgl_compose(struct pipe_screen *screen,
 }
 #endif
 
+static void
+wgl_present_region(struct pipe_screen *screen, struct pipe_context *ctx,
+                   struct pipe_resource *res, HDC hdc, const RECT *damage)
+{
+#ifdef GALLIUM_VC4
+   if (use_vc4 && damage) {
+      struct pipe_box box;
+      u_box_2d(damage->left, damage->top,
+               damage->right - damage->left,
+               damage->bottom - damage->top, &box);
+      screen->flush_frontbuffer(screen, ctx, res, 0, 0, hdc, 1, &box);
+      return;
+   }
+#endif
+   wgl_present(screen, ctx, res, hdc);
+}
 
 static const struct stw_winsys stw_winsys = {
    &wgl_screen_create,
@@ -397,6 +430,7 @@ static const struct stw_winsys stw_winsys = {
 #endif
    &wgl_create_framebuffer,
    &wgl_get_name,
+   &wgl_present_region,
 };
 
 

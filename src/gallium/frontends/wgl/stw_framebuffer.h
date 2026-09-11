@@ -42,6 +42,8 @@ struct pipe_frontend_drawable;
 struct stw_pixelformat_info;
 struct pipe_frontend_screen;
 
+void APIENTRY stw_AddSwapHintRectWIN(GLint x, GLint y, GLsizei width, GLsizei height);
+
 enum stw_framebuffer_owner
 {
    /* WGL window framebuffers have no corresponding destroy, and therefore
@@ -123,6 +125,8 @@ struct stw_framebuffer
     * @sa GLCBPRESENTBUFFERSDATA::rect.
     */
    RECT client_rect;
+   RECT swap_hint;
+   bool swap_hint_valid;
 
    HANDLE hSharedSurface;
    struct stw_shared_surface *shared_surface;
@@ -200,7 +204,7 @@ stw_framebuffer_from_hdc(HDC hdc);
 BOOL
 stw_framebuffer_present_locked(HDC hdc,
                                struct stw_framebuffer *fb,
-                               struct pipe_resource *res);
+                               struct pipe_resource *res, bool swapping);
 
 void
 stw_framebuffer_update(struct stw_framebuffer *fb);

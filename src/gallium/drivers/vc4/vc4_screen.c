@@ -134,155 +134,210 @@ vc4_screen_destroy(struct pipe_screen *pscreen)
 
 #ifdef USE_VC4_D3DKMT
 static bool
-vc4_get_direct_present_origin(HDC hdc, unsigned width, unsigned height,
-                              unsigned *destination_x,
-                              unsigned *destination_y,
-                              unsigned *screen_width,
-                              unsigned *screen_height)
+vc4_screen_is_gpu_output(HWND window)
 {
-        HWND window = WindowFromDC(hdc);
-        RECT client_rect = { 0 };
-        RECT clip_rect = { 0 };
-        POINT origin = { 0 };
-        int object_type = GetObjectType(hdc);
-        BOOL visible = window && IsWindowVisible(window);
-        BOOL iconic = window && IsIconic(window);
-        int map_mode = GetMapMode(hdc);
-        BOOL client_ok = window && GetClientRect(window, &client_rect);
-        BOOL origin_ok = GetDCOrgEx(hdc, &origin);
-        int clip_type = GetClipBox(hdc, &clip_rect);
-        int display_width = GetDeviceCaps(hdc, HORZRES);
-        int display_height = GetDeviceCaps(hdc, VERTRES);
+        return window && GetPropW(window, L"ReactOS.Dwm.GpuOutput") != NULL;
+}
 
-        if (object_type != OBJ_DC || !window || !visible || iconic ||
-            map_mode != MM_TEXT || !client_ok || !origin_ok ||
-            clip_type != SIMPLEREGION ||
-            display_width <= 0 || display_height <= 0 ||
-            client_rect.left != 0 || client_rect.top != 0 ||
-            client_rect.right != (LONG)width ||
-            client_rect.bottom != (LONG)height ||
-            clip_rect.left != client_rect.left ||
-            clip_rect.top != client_rect.top ||
-            clip_rect.right != client_rect.right ||
-            clip_rect.bottom != client_rect.bottom ||
-            origin.x < 0 || origin.y < 0 ||
-            (uint64_t)(unsigned)origin.x + width > (unsigned)display_width ||
-            (uint64_t)(unsigned)origin.y + height > (unsigned)display_height)
-        {
-                return false;
-        }
+static void
+vc4_screen_gpu_failure(const char *stage, struct pipe_resource *resource)
+{
+        static unsigned failures;
+        char message[192];
 
-        *destination_x = origin.x;
-        *destination_y = origin.y;
-        *screen_width = display_width;
-        *screen_height = display_height;
-        return true;
+        failures++;
+        if (failures > 16 && (failures & (failures - 1)) != 0)
+                return;
+        _snprintf(message, sizeof(message) - 1,
+                  "RPI3VC4_GPU_PRESENT_FAIL stage=%s format=%u size=%ux%u\n",
+                  stage,
+                  resource ? resource->format : 0,
+                  resource ? resource->width0 : 0,
+                  resource ? resource->height0 : 0);
+        message[sizeof(message) - 1] = '\0';
+        OutputDebugStringA(message);
+}
+
+static void
+vc4_screen_drop_primary(struct vc4_screen *screen)
+{
+        screen->primary_present_valid = false;
+        pipe_resource_reference(&screen->primary_resource, NULL);
+        screen->primary_global_share = 0;
+        screen->primary_width = 0;
+        screen->primary_height = 0;
+        screen->primary_pitch = 0;
 }
 
 static bool
-vc4_get_primary_resource(struct vc4_screen *screen,
-                         struct pipe_resource **resource)
+vc4_screen_import_primary(struct vc4_screen *screen,
+                          enum pipe_format format,
+                          uintptr_t global_share, uint32_t width,
+                          uint32_t height, uint32_t pitch)
 {
+        struct pipe_screen *pscreen = &screen->base;
         struct pipe_resource templ = { 0 };
         struct winsys_handle whandle = { 0 };
-        uintptr_t global_share;
-        uint32_t width;
-        uint32_t height;
-        uint32_t pitch;
-
-        if (!vc4_d3dkmt_primary_info(screen->fd, &global_share,
-                                     &width, &height, &pitch))
-        {
-                return false;
-        }
 
         if (screen->primary_resource &&
-            (screen->primary_global_share != global_share ||
-             screen->primary_width != width ||
-             screen->primary_height != height ||
-             screen->primary_pitch != pitch))
-        {
-                pipe_resource_reference(&screen->primary_resource, NULL);
-        }
+            screen->primary_global_share == global_share &&
+            screen->primary_width == width &&
+            screen->primary_height == height &&
+            screen->primary_pitch == pitch &&
+            screen->primary_resource->format == format)
+                return true;
 
+        vc4_screen_drop_primary(screen);
+
+        templ.target = PIPE_TEXTURE_2D;
+        templ.format = format;
+        templ.width0 = width;
+        templ.height0 = height;
+        templ.depth0 = 1;
+        templ.array_size = 1;
+        templ.bind = PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_RENDER_TARGET;
+
+        whandle.type = WINSYS_HANDLE_TYPE_SHARED;
+        whandle.handle = (HANDLE)(uintptr_t)global_share;
+        whandle.stride = pitch;
+        whandle.modifier = DRM_FORMAT_MOD_LINEAR;
+
+        screen->primary_resource = pscreen->resource_from_handle(
+                pscreen, &templ, &whandle,
+                PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
         if (!screen->primary_resource)
-        {
-                templ.target = PIPE_TEXTURE_2D;
-                templ.format = PIPE_FORMAT_B8G8R8X8_UNORM;
-                templ.width0 = width;
-                templ.height0 = height;
-                templ.depth0 = 1;
-                templ.array_size = 1;
-                templ.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SHARED;
+                return false;
 
-                whandle.type = WINSYS_HANDLE_TYPE_SHARED;
-                whandle.handle = (void *)global_share;
-                whandle.stride = pitch;
-                whandle.modifier = DRM_FORMAT_MOD_LINEAR;
-                screen->primary_resource = screen->base.resource_from_handle(
-                        &screen->base, &templ, &whandle,
-                        PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
-                if (!screen->primary_resource)
-                {
-                        return false;
-                }
-
-                screen->primary_global_share = global_share;
-                screen->primary_width = width;
-                screen->primary_height = height;
-                screen->primary_pitch = pitch;
-        }
-
-        *resource = screen->primary_resource;
+        screen->primary_global_share = global_share;
+        screen->primary_width = width;
+        screen->primary_height = height;
+        screen->primary_pitch = pitch;
         return true;
 }
 
 static bool
-vc4_present_primary(struct pipe_screen *pscreen,
-                    struct pipe_context *ctx,
-                    struct pipe_resource *source,
-                    HDC hdc,
-                    unsigned width,
-                    unsigned height)
+vc4_screen_present_gpu_impl(struct vc4_screen *screen,
+                       struct pipe_context *ctx,
+                       struct pipe_resource *resource,
+                       unsigned level, unsigned layer, HDC hdc,
+                       const struct pipe_box *damage)
 {
-        struct vc4_screen *screen = vc4_screen(pscreen);
-        struct pipe_resource *primary;
-        struct pipe_box source_box;
-        RECT dirty_rect;
-        unsigned destination_x;
-        unsigned destination_y;
-        unsigned screen_width;
-        unsigned screen_height;
+        struct pipe_blit_info blit = { 0 };
+        struct vc4_resource *primary;
+        uintptr_t global_share;
+        uint32_t primary_width, primary_height, primary_pitch;
+        unsigned width = u_minify(resource->width0, level);
+        unsigned height = u_minify(resource->height0, level);
+        HWND window = WindowFromDC(hdc);
+        RECT client;
+        RECT dirty;
+        POINT origin = { 0, 0 };
+        struct pipe_box copy = {0, 0, 0, width, height, 1};
 
-        if (!ctx ||
-            !vc4_get_direct_present_origin(hdc, width, height,
-                                           &destination_x, &destination_y,
-                                           &screen_width, &screen_height) ||
-            !vc4_get_primary_resource(screen, &primary) ||
-            primary->width0 != screen_width ||
-            primary->height0 != screen_height)
-        {
+        if (!window || !GetClientRect(window, &client) ||
+            !ClientToScreen(window, &origin) ||
+            client.right - client.left != (LONG)width ||
+            client.bottom - client.top != (LONG)height ||
+            origin.x < 0 || origin.y < 0) {
+                vc4_screen_gpu_failure("geometry", resource);
                 return false;
         }
 
-        source_box.x = 0;
-        source_box.y = 0;
-        source_box.z = 0;
-        source_box.width = width;
-        source_box.height = height;
-        source_box.depth = 1;
-        ctx->resource_copy_region(ctx, primary, 0,
-                                  destination_x, destination_y, 0,
-                                  source, 0, &source_box);
+        if (!vc4_d3dkmt_primary_info(screen->fd, &global_share,
+                                     &primary_width, &primary_height,
+                                     &primary_pitch) ||
+            !global_share || primary_pitch < primary_width * 4 ||
+            (uint64_t)(unsigned)origin.x + width > primary_width ||
+            (uint64_t)(unsigned)origin.y + height > primary_height) {
+                vc4_screen_gpu_failure("primary_info", resource);
+                return false;
+        }
+
+        if (!vc4_screen_import_primary(screen, resource->format, global_share,
+                                       primary_width, primary_height,
+                                       primary_pitch)) {
+                vc4_screen_gpu_failure("primary_import", resource);
+                return false;
+        }
+
+        if (screen->primary_resource->width0 != primary_width ||
+            screen->primary_resource->height0 != primary_height) {
+                vc4_screen_gpu_failure("primary_size", resource);
+                return false;
+        }
+
+        /* Only the registered, full-size compositor output owns the complete
+         * primary image. First import/recreation/error repairs it in full.
+         * Expand hints to whole tiles so LOAD/STORE uses the existing RCL
+         * path, including the permitted partial tile at the surface edge. */
+        if (screen->primary_present_valid && damage && level == 0 && layer == 0 &&
+            resource->nr_samples <= 1 && origin.x == 0 && origin.y == 0 &&
+            width == primary_width && height == primary_height &&
+            damage->x >= 0 && damage->y >= 0 && damage->z == 0 &&
+            damage->width > 0 && damage->height > 0 && damage->depth == 1 &&
+            (uint64_t)damage->x + damage->width <= width &&
+            (uint64_t)damage->y + damage->height <= height) {
+                copy.x = damage->x & ~63;
+                copy.y = damage->y & ~63;
+                copy.width = MIN2(align(damage->x + damage->width, 64), width) - copy.x;
+                copy.height = MIN2(align(damage->y + damage->height, 64), height) - copy.y;
+        }
+
+        blit.src.resource = resource;
+        blit.src.level = level;
+        blit.src.box.x = copy.x;
+        blit.src.box.y = copy.y;
+        blit.src.box.z = layer;
+        blit.src.box.width = copy.width;
+        blit.src.box.height = copy.height;
+        blit.src.box.depth = 1;
+        blit.src.format = resource->format;
+        blit.dst.resource = screen->primary_resource;
+        blit.dst.level = 0;
+        blit.dst.box.x = origin.x + copy.x;
+        blit.dst.box.y = origin.y + copy.y;
+        blit.dst.box.z = 0;
+        blit.dst.box.width = copy.width;
+        blit.dst.box.height = copy.height;
+        blit.dst.box.depth = 1;
+        blit.dst.format = screen->primary_resource->format;
+        blit.mask = PIPE_MASK_RGBA;
+        blit.filter = PIPE_TEX_FILTER_NEAREST;
+
+        bool blit_ok = vc4_render_blit_for_present(ctx, &blit);
+        if (!blit_ok) {
+                vc4_screen_gpu_failure("render_blit", resource);
+                return false;
+        }
+
         ctx->flush(ctx, NULL, PIPE_FLUSH_END_OF_FRAME);
 
-        dirty_rect.left = destination_x;
-        dirty_rect.top = destination_y;
-        dirty_rect.right = destination_x + width;
-        dirty_rect.bottom = destination_y + height;
-        return vc4_d3dkmt_present_primary(
-                screen->fd, vc4_resource(primary)->bo->handle,
-                WindowFromDC(hdc), &dirty_rect);
+        dirty.left = origin.x;
+        dirty.top = origin.y;
+        dirty.right = origin.x + width;
+        dirty.bottom = origin.y + height;
+        primary = vc4_resource(screen->primary_resource);
+        if (!vc4_d3dkmt_present_primary(screen->fd, primary->bo->handle,
+                                        window, &dirty)) {
+                vc4_screen_gpu_failure("flip", resource);
+                return false;
+        }
+        screen->primary_present_valid = true;
+
+        return true;
+}
+
+static bool
+vc4_screen_present_gpu(struct vc4_screen *screen,
+                       struct pipe_context *ctx,
+                       struct pipe_resource *resource,
+                       unsigned level, unsigned layer, HDC hdc,
+                       const struct pipe_box *damage)
+{
+    bool Result = vc4_screen_present_gpu_impl(screen, ctx, resource, level, layer, hdc, damage);
+    if (!Result)
+        screen->primary_present_valid = false;
+    return Result;
 }
 
 static void
@@ -293,30 +348,34 @@ vc4_screen_flush_frontbuffer(struct pipe_screen *pscreen,
                              void *winsys_drawable_handle,
                              unsigned nboxes, struct pipe_box *subbox)
 {
+        struct vc4_screen *screen = vc4_screen(pscreen);
         struct vc4_resource *rsc = vc4_resource(resource);
         BITMAPV5HEADER bitmap = { 0 };
         unsigned width = u_minify(resource->width0, level);
         unsigned height = u_minify(resource->height0, level);
         const uint8_t *map;
         const uint8_t *pixels;
-
-        (void)pscreen;
-        (void)ctx;
-        (void)nboxes;
-        (void)subbox;
+        HDC hdc = winsys_drawable_handle;
+        HWND window;
 
         if (!winsys_drawable_handle || level >= VC4_MAX_MIP_LEVELS ||
-            layer >= resource->array_size || rsc->cpp != 4 || rsc->tiled)
+            layer >= resource->array_size || rsc->cpp != 4)
+                return;
+
+        window = WindowFromDC(hdc);
+        if (vc4_screen_is_gpu_output(window)) {
+                vc4_screen_present_gpu(screen, ctx, resource, level,
+                                        layer, hdc, nboxes == 1 ? subbox : NULL);
+                return;
+        }
+
+        if (rsc->tiled)
                 return;
 
         switch (resource->format) {
         case PIPE_FORMAT_B8G8R8X8_UNORM:
         case PIPE_FORMAT_B8G8R8A8_UNORM:
                 bitmap.bV5Compression = BI_RGB;
-                if (vc4_present_primary(pscreen, ctx, resource,
-                                        winsys_drawable_handle,
-                                        width, height))
-                        return;
                 break;
         case PIPE_FORMAT_R8G8B8X8_UNORM:
         case PIPE_FORMAT_R8G8B8A8_UNORM:

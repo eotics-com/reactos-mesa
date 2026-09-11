@@ -524,6 +524,7 @@ EXT(SGIS_texture_edge_clamp                 , dummy_true                        
 EXT(SGIS_texture_lod                        , dummy_true                             , GLL,  x ,  x ,  x , 1997)
 
 EXT(SUN_multi_draw_arrays                   , dummy_true                             , GLL,  x ,  x ,  x , 1999)
+EXT(WIN_swap_hint                           , WIN_swap_hint                          , GLL,  x ,  x ,  x , 1994)
 #undef GLL
 #undef GLC
 #undef ES1

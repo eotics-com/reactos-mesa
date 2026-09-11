@@ -61,6 +61,10 @@ struct vc4_resource {
          * can't support in hardware) or GL_UNSIGNED_INTEGER index buffers.
          */
         uint64_t writes;
+#ifdef USE_VC4_D3DKMT
+        /* WGL consumer explicitly notifies every completed publication. */
+        bool external_updates_tracked;
+#endif
 
         /**
          * Bitmask of PIPE_CLEAR_COLOR0, PIPE_CLEAR_DEPTH, PIPE_CLEAR_STENCIL

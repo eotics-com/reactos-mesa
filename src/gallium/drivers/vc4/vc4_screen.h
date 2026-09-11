@@ -111,6 +111,7 @@ struct vc4_screen {
 
 #ifdef USE_VC4_D3DKMT
         struct pipe_resource *primary_resource;
+        bool primary_present_valid;
         uintptr_t primary_global_share;
         uint32_t primary_width;
         uint32_t primary_height;

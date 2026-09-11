@@ -45,6 +45,7 @@ struct gl_extensions
 {
    GLboolean dummy;  /* don't remove this! */
    GLboolean dummy_true;  /* Set true by _mesa_init_extensions(). */
+   GLboolean WIN_swap_hint; /* Enabled only by the WGL frontend. */
    GLboolean ANGLE_texture_compression_dxt;
    GLboolean ARB_ES2_compatibility;
    GLboolean ARB_ES3_compatibility;

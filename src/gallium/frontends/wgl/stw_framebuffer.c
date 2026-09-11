@@ -45,6 +45,55 @@
 #include "stw_tls.h"
 #include "stw_context.h"
 #include "stw_st.h"
+#include "main/errors.h"
+
+/* Vendor-owned synchronous callback payload. opengl32 only returns this
+ * opaque pointer; no public callback structure or token layout is extended. */
+struct stw_present_private {
+   struct pipe_resource *resource;
+   RECT damage;
+   bool has_damage;
+};
+
+void APIENTRY
+stw_AddSwapHintRectWIN(GLint x, GLint y, GLsizei width, GLsizei height)
+{
+   struct stw_context *ctx = stw_current_context();
+   if (!ctx)
+      return;
+   if (width < 0 || height < 0) {
+      _mesa_error(ctx->st->ctx, GL_INVALID_VALUE, "glAddSwapHintRectWIN(size)");
+      return;
+   }
+   struct stw_framebuffer *fb = stw_framebuffer_from_hdc(ctx->hDrawDC);
+   if (!fb)
+      return;
+   /* Widen before addition and clip in GL's lower-left coordinates. */
+   int64_t left = MAX2((int64_t)x, 0);
+   int64_t bottom = MAX2((int64_t)y, 0);
+   int64_t right = MIN2((int64_t)x + width, fb->width);
+   int64_t top = MIN2((int64_t)y + height, fb->height);
+   if (right > left && top > bottom) {
+      RECT rect = {(LONG)left, (LONG)(fb->height - top),
+                   (LONG)right, (LONG)(fb->height - bottom)};
+      if (fb->swap_hint_valid)
+         UnionRect(&fb->swap_hint, &fb->swap_hint, &rect);
+      else
+         fb->swap_hint = rect;
+      fb->swap_hint_valid = true;
+   }
+   stw_framebuffer_unlock(fb);
+}
+
+static void
+stw_present_region(struct pipe_screen *screen, struct pipe_context *pipe,
+                   struct pipe_resource *res, HDC hdc, const RECT *damage)
+{
+   if (damage && stw_dev->stw_winsys->present_region)
+      stw_dev->stw_winsys->present_region(screen, pipe, res, hdc, damage);
+   else
+      stw_dev->stw_winsys->present(screen, pipe, res, hdc);
+}
 
 
 /**
@@ -178,6 +227,7 @@ stw_framebuffer_get_size(struct stw_framebuffer *fb)
 
    if (width != fb->width || height != fb->height) {
       fb->must_resize = true;
+      fb->swap_hint_valid = false;
       fb->width = width;
       fb->height = height;
    }
@@ -608,7 +658,8 @@ stw_present_buffers(HDC hdc, LPPRESENTBUFFERS data, HANDLE completion_event)
    ctx = stw_current_context();
    pipe = ctx ? ctx->st->pipe : NULL;
 
-   res = (struct pipe_resource *)data->pPrivData;
+   const struct stw_present_private *present = data->pPrivData;
+   res = present->resource;
 
    if (data->hSurface != fb->hSharedSurface) {
       if (fb->shared_surface) {
@@ -644,7 +695,8 @@ stw_present_buffers(HDC hdc, LPPRESENTBUFFERS data, HANDLE completion_event)
          }
       }
       else {
-         stw_dev->stw_winsys->present( screen, pipe, res, hdc );
+         stw_present_region(screen, pipe, res, hdc,
+                            present->has_damage ? &present->damage : NULL);
          if (completion_event && !SetEvent(completion_event)) {
             stw_framebuffer_update(fb);
             stw_notify_current_locked(fb);
@@ -700,8 +752,15 @@ DrvPresentBuffers2(HDC hdc, LPPRESENTBUFFERS2 data)
 BOOL
 stw_framebuffer_present_locked(HDC hdc,
                                struct stw_framebuffer *fb,
-                               struct pipe_resource *res)
+                               struct pipe_resource *res, bool swapping)
 {
+   struct stw_present_private present = {
+      .resource = res, .damage = fb->swap_hint,
+      .has_damage = swapping && fb->swap_hint_valid && !fb->must_resize,
+   };
+   /* Snapshot under the framebuffer mutex; callbacks may unlock/reenter. */
+   if (swapping)
+      fb->swap_hint_valid = false;
    if (fb->winsys_framebuffer) {
       int interval = fb->swap_interval == -1 ? stw_dev->swap_interval : fb->swap_interval;
       BOOL result = fb->winsys_framebuffer->present(fb->winsys_framebuffer, interval);
@@ -723,7 +782,7 @@ stw_framebuffer_present_locked(HDC hdc,
       /* The callback rectangle is window-relative. opengl32 converts it
        * to the client-sized shared allocation when publishing to DWM. */
       data.updateRect = fb->client_rect;
-      data.pPrivData = (void *)res;
+      data.pPrivData = &present;
 
       stw_notify_current_locked(fb);
       stw_framebuffer_unlock(fb);
@@ -735,7 +794,8 @@ stw_framebuffer_present_locked(HDC hdc,
       struct stw_context *ctx = stw_current_context();
       struct pipe_context *pipe = ctx ? ctx->st->pipe : NULL;
 
-      stw_dev->stw_winsys->present( screen, pipe, res, hdc );
+      stw_present_region(screen, pipe, res, hdc,
+                         present.has_damage ? &present.damage : NULL);
 
       stw_framebuffer_update(fb);
       stw_notify_current_locked(fb);
@@ -785,6 +845,7 @@ stw_framebuffer_swap_locked(HDC hdc, struct stw_framebuffer *fb)
 {
    struct stw_context *ctx = stw_current_context();
    if (!(fb->pfi->pfd.dwFlags & PFD_DOUBLEBUFFER)) {
+      fb->swap_hint_valid = false;
       stw_framebuffer_unlock(fb);
       if (ctx)
          stw_st_flush(ctx->st, fb->drawable, ST_FLUSH_END_OF_FRAME | ST_FLUSH_FRONT);

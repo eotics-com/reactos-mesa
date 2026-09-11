@@ -32,6 +32,9 @@
 #include <GL/gl.h>
 #include <GL/wglext.h>
 #include <GL/mesa_glinterop.h>
+#ifdef HAVE_ROS_SHARED_TEXTURE
+#include "dwmgpuinterop.h"
+#endif
 
 #include "glapi/glapi/glapi.h"
 #include "stw_device.h"
@@ -40,6 +43,8 @@
 #include "stw_nopfuncs.h"
 
 #include "util/u_debug.h"
+
+#include "stw_framebuffer.h"
 
 struct stw_extension_entry
 {
@@ -86,6 +91,10 @@ static const struct stw_extension_entry stw_extension_entries[] = {
    STW_EXTENSION_ENTRY( wglGetCurrentReadDCARB ),
 
    /* Unnamed */
+#ifdef HAVE_ROS_SHARED_TEXTURE
+   STW_EXTENSION_ENTRY( wglBindSharedTextureROS ),
+   STW_EXTENSION_ENTRY( wglUpdateSharedTextureROS ),
+#endif
    STW_EXTENSION_ENTRY( wglMesaGLInteropQueryDeviceInfo ),
    STW_EXTENSION_ENTRY( wglMesaGLInteropExportObject ),
    STW_EXTENSION_ENTRY( wglMesaGLInteropFlushObjects ),
@@ -101,6 +110,11 @@ DrvGetProcAddress(
 
    if (!stw_dev)
       return NULL;
+
+#ifdef __REACTOS__
+   if (strcmp(lpszProc, "glAddSwapHintRectWIN") == 0)
+      return (PROC)stw_AddSwapHintRectWIN;
+#endif
 
    if (lpszProc[0] == 'w' && lpszProc[1] == 'g' && lpszProc[2] == 'l')
       for (entry = stw_extension_entries; entry->name; entry++)
