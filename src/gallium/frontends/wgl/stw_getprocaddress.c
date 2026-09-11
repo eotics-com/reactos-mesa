@@ -34,6 +34,7 @@
 #include <GL/mesa_glinterop.h>
 #ifdef HAVE_ROS_SHARED_TEXTURE
 #include "dwmgpuinterop.h"
+#include "dwmpresenttrace.h"
 #endif
 
 #include "glapi/glapi/glapi.h"
@@ -94,6 +95,7 @@ static const struct stw_extension_entry stw_extension_entries[] = {
 #ifdef HAVE_ROS_SHARED_TEXTURE
    STW_EXTENSION_ENTRY( wglBindSharedTextureROS ),
    STW_EXTENSION_ENTRY( wglUpdateSharedTextureROS ),
+   STW_EXTENSION_ENTRY( wglControlPresentationTraceROS ),
 #endif
    STW_EXTENSION_ENTRY( wglMesaGLInteropQueryDeviceInfo ),
    STW_EXTENSION_ENTRY( wglMesaGLInteropExportObject ),

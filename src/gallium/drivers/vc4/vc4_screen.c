@@ -304,13 +304,17 @@ vc4_screen_present_gpu_impl(struct vc4_screen *screen,
         blit.mask = PIPE_MASK_RGBA;
         blit.filter = PIPE_TEX_FILTER_NEAREST;
 
+        DPT_SCOPE stage_trace = DptBegin(&vc4_present_trace, DPT_BLIT);
         bool blit_ok = vc4_render_blit_for_present(ctx, &blit);
+        DptEnd(&vc4_present_trace, stage_trace, blit_ok, (ULONGLONG)copy.width * copy.height * 4);
         if (!blit_ok) {
                 vc4_screen_gpu_failure("render_blit", resource);
                 return false;
         }
 
+        stage_trace = DptBegin(&vc4_present_trace, DPT_FLUSH);
         ctx->flush(ctx, NULL, PIPE_FLUSH_END_OF_FRAME);
+        DptEnd(&vc4_present_trace, stage_trace, TRUE, 0);
 
         dirty.left = origin.x;
         dirty.top = origin.y;
@@ -334,9 +338,11 @@ vc4_screen_present_gpu(struct vc4_screen *screen,
                        unsigned level, unsigned layer, HDC hdc,
                        const struct pipe_box *damage)
 {
+    DPT_SCOPE Trace = DptBegin(&vc4_present_trace, DPT_MESA_PRESENT);
     bool Result = vc4_screen_present_gpu_impl(screen, ctx, resource, level, layer, hdc, damage);
     if (!Result)
         screen->primary_present_valid = false;
+    DptEnd(&vc4_present_trace, Trace, Result, 0);
     return Result;
 }
 

@@ -28,6 +28,7 @@
 #include "stw_device.h"
 #ifdef HAVE_ROS_SHARED_TEXTURE
 #include "dwmgpuinterop.h"
+#include "dwmpresenttrace.h"
 #include "stw_winsys.h"
 #include "state_tracker/st_context.h"
 #include "main/texobj.h"
@@ -190,3 +191,14 @@ stw_interop_flush_objects(struct stw_context *ctx,
    return st_interop_flush_objects(ctx->st, count, objects, out);
 }
 
+#ifdef HAVE_ROS_SHARED_TEXTURE
+BOOL WINAPI
+wglControlPresentationTraceROS(const DPT_REQUEST *request, DPT_DOMAIN *output, ULONG bytes)
+{
+   if (!stw_dev || !stw_dev->stw_winsys->presentation_trace) {
+      SetLastError(ERROR_NOT_SUPPORTED);
+      return FALSE;
+   }
+   return stw_dev->stw_winsys->presentation_trace(request, output, bytes);
+}
+#endif

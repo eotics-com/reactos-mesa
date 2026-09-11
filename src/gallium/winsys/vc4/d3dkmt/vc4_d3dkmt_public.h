@@ -9,6 +9,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <windows.h>
+#include "dwmpresenttracecore.h"
+
+extern DPT_BANK vc4_present_trace;
+BOOL vc4_d3dkmt_trace_control(const void *request, void *output, ULONG bytes);
 
 struct pipe_screen;
 struct pipe_screen_config;

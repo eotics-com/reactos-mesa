@@ -1164,7 +1164,13 @@ vc4_update_shadow_baselevel_texture(struct pipe_context *pctx,
                         },
                         .mask = util_format_get_mask(orig->base.format),
                 };
+#ifdef USE_VC4_D3DKMT
+                DPT_SCOPE trace = DptBegin(&vc4_present_trace, DPT_TILING);
+#endif
                 pctx->blit(pctx, &info);
+#ifdef USE_VC4_D3DKMT
+                DptEnd(&vc4_present_trace, trace, TRUE, (ULONGLONG)width * height * orig->cpp);
+#endif
         }
 
         shadow->writes = orig->writes;

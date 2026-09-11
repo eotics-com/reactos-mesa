@@ -156,6 +156,19 @@ _Static_assert(sizeof(RPI3VC4_INFO) == 96,
 _Static_assert(offsetof(RPI3VC4_INFO, v3d_physical) == 40,
                "rpi3vc4kmt info physical offset mismatch");
 
+DPT_BANK vc4_present_trace;
+
+BOOL
+vc4_d3dkmt_trace_control(const void *request, void *output, ULONG bytes)
+{
+   LONG status = DptControl(&vc4_present_trace, request, output, bytes, GetCurrentProcessId());
+   if (status < 0) {
+      SetLastError((DWORD)status & 0xffff);
+      return FALSE;
+   }
+   return TRUE;
+}
+
 #define VC4_D3DKMT_MAX_DEVICES 8
 #define VC4_D3DKMT_FD_BASE 0x40000000
 #define VC4_D3DKMT_MAX_SUBMIT_BOS 4096u
@@ -371,7 +384,11 @@ vc4_d3dkmt_close(int fd)
    if (!device)
       return;
 
-   mtx_lock(&device->lock);
+   {
+      DPT_SCOPE trace = DptBegin(&vc4_present_trace, DPT_DEVICE_LOCK);
+      mtx_lock(&device->lock);
+      DptEnd(&vc4_present_trace, trace, TRUE, 0);
+   }
    for (uint32_t i = 1; i < device->bo_capacity; i++) {
       if (!device->bos[i].allocated)
          continue;
@@ -397,7 +414,11 @@ vc4_d3dkmt_bo_map(int fd, uint32_t handle)
 
    if (!device)
       return NULL;
-   mtx_lock(&device->lock);
+   {
+      DPT_SCOPE trace = DptBegin(&vc4_present_trace, DPT_DEVICE_LOCK);
+      mtx_lock(&device->lock);
+      DptEnd(&vc4_present_trace, trace, TRUE, 0);
+   }
    bo = vc4_d3dkmt_bo_lookup_locked(device, handle);
    if (bo && !(bo->kmt.flags & RPI3VC4KMT_BO_SHADER) &&
        rpi3vc4kmt_bo_map(device->kmt, &bo->kmt, &map) < 0)
@@ -414,15 +435,19 @@ vc4_d3dkmt_bo_mark_cpu_dirty(int fd, uint32_t handle)
 
    if (!device)
       return;
-   mtx_lock(&device->lock);
+   {
+      DPT_SCOPE trace = DptBegin(&vc4_present_trace, DPT_DEVICE_LOCK);
+      mtx_lock(&device->lock);
+      DptEnd(&vc4_present_trace, trace, TRUE, 0);
+   }
    bo = vc4_d3dkmt_bo_lookup_locked(device, handle);
    if (bo)
       bo->kmt.flags |= RPI3VC4KMT_BO_CPU_DIRTY;
    mtx_unlock(&device->lock);
 }
 
-bool
-vc4_d3dkmt_primary_info(int fd, uintptr_t *global_share,
+static bool
+vc4_d3dkmt_primary_info_impl(int fd, uintptr_t *global_share,
                         uint32_t *width, uint32_t *height, uint32_t *pitch)
 {
    struct vc4_d3dkmt_device *device = vc4_d3dkmt_device_lookup(fd);
@@ -431,7 +456,11 @@ vc4_d3dkmt_primary_info(int fd, uintptr_t *global_share,
    if (!device || !global_share || !width || !height || !pitch)
       return false;
 
-   mtx_lock(&device->lock);
+   {
+      DPT_SCOPE trace = DptBegin(&vc4_present_trace, DPT_DEVICE_LOCK);
+      mtx_lock(&device->lock);
+      DptEnd(&vc4_present_trace, trace, TRUE, 0);
+   }
    status = rpi3vc4kmt_primary_info(device->kmt,
                                     &device->primary_global_share,
                                     &device->primary_width,
@@ -448,6 +477,16 @@ vc4_d3dkmt_primary_info(int fd, uintptr_t *global_share,
 }
 
 bool
+vc4_d3dkmt_primary_info(int fd, uintptr_t *global_share,
+                        uint32_t *width, uint32_t *height, uint32_t *pitch)
+{
+   DPT_SCOPE trace = DptBegin(&vc4_present_trace, DPT_PRIMARY_QUERY);
+   bool result = vc4_d3dkmt_primary_info_impl(fd, global_share, width, height, pitch);
+   DptEnd(&vc4_present_trace, trace, result, 0);
+   return result;
+}
+
+bool
 vc4_d3dkmt_present_primary(int fd, uint32_t primary_handle, HWND window,
                            const RECT *dirty_rect)
 {
@@ -458,19 +497,29 @@ vc4_d3dkmt_present_primary(int fd, uint32_t primary_handle, HWND window,
    if (!device || !dirty_rect)
       return false;
 
-   mtx_lock(&device->lock);
+   {
+      DPT_SCOPE trace = DptBegin(&vc4_present_trace, DPT_DEVICE_LOCK);
+      mtx_lock(&device->lock);
+      DptEnd(&vc4_present_trace, trace, TRUE, 0);
+   }
    primary = vc4_d3dkmt_bo_lookup_locked(device, primary_handle);
    if (!primary || !primary->resource)
       goto done;
-   if (primary->last_fence.value &&
-       vc4_d3dkmt_wait_fence_locked(device, &primary->last_fence,
-                                    UINT64_MAX))
+   DPT_SCOPE trace = DptBegin(&vc4_present_trace, DPT_FENCE_WAIT);
+   int status = primary->last_fence.value ?
+      vc4_d3dkmt_wait_fence_locked(device, &primary->last_fence, UINT64_MAX) : 0;
+   DptEnd(&vc4_present_trace, trace, status == 0, 0);
+   if (status)
       goto done;
-   if (rpi3vc4kmt_bo_invalidate(device->kmt, &primary->kmt,
-                                0, primary->kmt.size) < 0)
+   trace = DptBegin(&vc4_present_trace, DPT_INVALIDATE);
+   status = rpi3vc4kmt_bo_invalidate(device->kmt, &primary->kmt, 0, primary->kmt.size);
+   DptEnd(&vc4_present_trace, trace, status >= 0, primary->kmt.size);
+   if (status < 0)
       goto done;
+   trace = DptBegin(&vc4_present_trace, DPT_KMT_PRESENT);
    result = rpi3vc4kmt_present_primary(device->kmt, &primary->kmt,
                                        window, dirty_rect) >= 0;
+   DptEnd(&vc4_present_trace, trace, result, 0);
 
 done:
    mtx_unlock(&device->lock);
@@ -604,7 +653,10 @@ vc4_d3dkmt_submit_locked(struct vc4_d3dkmt_device *device,
    kmt.clear_s = submit->clear_s;
    kmt.flags = submit->flags;
 
-   if (rpi3vc4kmt_submit_cl(device->kmt, &kmt, &fence) < 0) {
+   DPT_SCOPE trace = DptBegin(&vc4_present_trace, DPT_KMT_SUBMIT);
+   rpi3vc4kmt_status status = rpi3vc4kmt_submit_cl(device->kmt, &kmt, &fence);
+   DptEnd(&vc4_present_trace, trace, status >= 0, kmt.bin_cl_size);
+   if (status < 0) {
       errno = EIO;
       return -1;
    }
@@ -618,8 +670,8 @@ vc4_d3dkmt_submit_locked(struct vc4_d3dkmt_device *device,
    return 0;
 }
 
-int
-vc4_d3dkmt_ioctl(int fd, unsigned long request, void *arg)
+static int
+vc4_d3dkmt_ioctl_impl(int fd, unsigned long request, void *arg)
 {
    struct vc4_d3dkmt_device *device = vc4_d3dkmt_device_lookup(fd);
    int result = -1;
@@ -628,7 +680,11 @@ vc4_d3dkmt_ioctl(int fd, unsigned long request, void *arg)
       errno = EINVAL;
       return -1;
    }
-   mtx_lock(&device->lock);
+   {
+      DPT_SCOPE trace = DptBegin(&vc4_present_trace, DPT_DEVICE_LOCK);
+      mtx_lock(&device->lock);
+      DptEnd(&vc4_present_trace, trace, TRUE, 0);
+   }
    switch (request) {
    case DRM_IOCTL_VC4_GET_PARAM:
       result = vc4_d3dkmt_get_param(device, arg);
@@ -657,6 +713,7 @@ vc4_d3dkmt_ioctl(int fd, unsigned long request, void *arg)
       bo->modifier = DRM_FORMAT_MOD_LINEAR;
       create->handle = handle;
       result = 0;
+      DptCount(&vc4_present_trace, DPT_BO_CREATE, create->size);
       break;
    }
    case DRM_IOCTL_VC4_CREATE_SHADER_BO: {
@@ -884,4 +941,13 @@ vc4_d3dkmt_screen_create(const struct pipe_screen_config *config)
    if (!screen)
       vc4_d3dkmt_close(fd);
    return screen;
+}
+
+int
+vc4_d3dkmt_ioctl(int fd, unsigned long request, void *arg)
+{
+   DPT_SCOPE trace = DptBegin(&vc4_present_trace, DPT_IOCTL);
+   int result = vc4_d3dkmt_ioctl_impl(fd, request, arg);
+   DptEnd(&vc4_present_trace, trace, result >= 0, 0);
+   return result;
 }

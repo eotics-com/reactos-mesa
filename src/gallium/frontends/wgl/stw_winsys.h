@@ -140,6 +140,8 @@ struct stw_winsys
    const char *
    (*get_name)(void);
 
+   BOOL (*presentation_trace)(const void *request, void *output, ULONG bytes);
+
    /* Optional internal callback; public PRESENTBUFFERS layouts are unchanged. */
    void (*present_region)(struct pipe_screen *screen,
                           struct pipe_context *context,
