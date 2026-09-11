@@ -32,6 +32,20 @@ upstream logging, command-list interfaces and framebuffer lookup changes.
 VC4-specific shared-surface callbacks are not installed in LLVMpipe-only
 builds. Failed VC4 screen creation leaves device ownership with its winsys.
 
+Local ReactOS patches
+---------------------
+
+``dll/opengl/rpi3vc4ogl/arm64-tile-read.patch`` is imported unchanged in
+its own commit: paired ARM64 utile loads, early-clobber destination
+registers and a memory clobber.
+
+``dll/opengl/rpi3vc4ogl/wgl-present-fix.patch`` is adapted to the imported
+port. Present callbacks use version 2 and a window-relative client
+rectangle. The legacy ``PRESENTBUFFERS`` structure was already restored
+by the old fork, so those obsolete hunks are not replayed. Its separate,
+size/version-checked ``DrvPresentBuffers2`` interface is retained;
+legacy callers never supply or expose trailing event fields.
+
 Build and validation boundary
 -----------------------------
 

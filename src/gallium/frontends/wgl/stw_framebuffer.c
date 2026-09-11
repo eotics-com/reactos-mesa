@@ -711,11 +711,12 @@ stw_framebuffer_present_locked(HDC hdc,
       PRESENTBUFFERSCB data;
 
       memset(&data, 0, sizeof data);
-      data.nVersion = 3;
+      data.nVersion = 2;
       data.syncType = PRESCB_SYNCTYPE_NONE;
       data.luidAdapter = stw_dev->AdapterLuid;
-      data.updateRect.right = fb->width;
-      data.updateRect.bottom = fb->height;
+      /* The callback rectangle is window-relative. opengl32 converts it
+       * to the client-sized shared allocation when publishing to DWM. */
+      data.updateRect = fb->client_rect;
       data.pPrivData = (void *)res;
 
       stw_notify_current_locked(fb);
