@@ -1523,7 +1523,7 @@ drmIoctl(int fd, unsigned long request, void *arg)
           info.version != DWM_DX_SURFACE_INFO_VERSION ||
           info.width == 0 || info.height == 0 ||
           info.width > UINT32_MAX / 4 ||
-          info.pitch != info.width * 4 ||
+          info.pitch < info.width * 4 || (info.pitch & 3) != 0 ||
           info.format != DWM_DX_FORMAT_B8G8R8A8_UNORM) {
          errno = EINVAL;
          break;
@@ -1603,7 +1603,7 @@ v3d_d3dkmt_shared_surface_info(struct pipe_screen *screen,
        info.magic != DWM_DX_SURFACE_INFO_MAGIC ||
        info.version != DWM_DX_SURFACE_INFO_VERSION ||
        !info.width || !info.height || info.width > UINT32_MAX / 4 ||
-       info.pitch != info.width * 4 ||
+       info.pitch < info.width * 4 || (info.pitch & 3) != 0 ||
        info.format != DWM_DX_FORMAT_B8G8R8A8_UNORM)
       return false;
 

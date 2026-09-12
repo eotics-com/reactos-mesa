@@ -1083,7 +1083,12 @@ v3d_update_shadow_texture(struct pipe_context *pctx,
 
         assert(view->texture != pview->texture);
 
-        if (shadow->writes == orig->writes && orig->bo->private)
+        if (shadow->writes == orig->writes &&
+            (orig->bo->private
+#ifdef __REACTOS__
+             || orig->external_updates_tracked
+#endif
+            ))
                 return;
 
         perf_debug("Updating %dx%d@%d shadow for linear texture\n",
@@ -1217,6 +1222,18 @@ static const struct u_transfer_vtbl transfer_vtbl = {
         .get_stencil              = v3d_resource_get_stencil,
 };
 
+#ifdef __REACTOS__
+static void
+v3d_resource_changed(struct pipe_screen *pscreen, struct pipe_resource *prsc)
+{
+        struct v3d_resource *rsc = v3d_resource(prsc);
+        (void)pscreen;
+        /* Invalidate the tiled copy without changing shared BO ownership. */
+        rsc->external_updates_tracked = true;
+        rsc->writes++;
+}
+#endif
+
 void
 v3d_resource_screen_init(struct pipe_screen *pscreen)
 {
@@ -1226,6 +1243,9 @@ v3d_resource_screen_init(struct pipe_screen *pscreen)
         pscreen->resource_from_handle = v3d_resource_from_handle;
         pscreen->resource_get_handle = v3d_resource_get_handle;
         pscreen->resource_get_param = v3d_resource_get_param;
+#ifdef __REACTOS__
+        pscreen->resource_changed = v3d_resource_changed;
+#endif
         pscreen->resource_destroy = u_transfer_helper_resource_destroy;
         pscreen->transfer_helper = u_transfer_helper_create(&transfer_vtbl,
                                                             U_TRANSFER_HELPER_SEPARATE_Z32S8 |
