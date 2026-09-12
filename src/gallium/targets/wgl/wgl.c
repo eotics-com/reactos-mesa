@@ -411,6 +411,16 @@ wgl_present_region(struct pipe_screen *screen, struct pipe_context *ctx,
    wgl_present(screen, ctx, res, hdc);
 }
 
+static bool
+wgl_can_compose(void)
+{
+#ifdef GALLIUM_VC4
+   if (use_vc4)
+      return true;
+#endif
+   return false;
+}
+
 static const struct stw_winsys stw_winsys = {
    &wgl_screen_create,
    &wgl_present,
@@ -438,6 +448,7 @@ static const struct stw_winsys stw_winsys = {
    NULL,
 #endif
    &wgl_present_region,
+   &wgl_can_compose,
 };
 
 

@@ -148,6 +148,9 @@ struct stw_winsys
                           struct pipe_context *context,
                           struct pipe_resource *res, HDC hdc,
                           const RECT *damage);
+
+   /* A combined ICD may select a screen without shared-surface support. */
+   bool (*can_compose)(void);
 };
 
 bool

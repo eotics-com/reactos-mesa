@@ -793,7 +793,9 @@ stw_framebuffer_present_locked(HDC hdc,
       return result;
    }
    else if (stw_dev->callbacks.pfnPresentBuffers &&
-            stw_dev->stw_winsys->compose) {
+            stw_dev->stw_winsys->compose &&
+            (!stw_dev->stw_winsys->can_compose ||
+             stw_dev->stw_winsys->can_compose())) {
       PRESENTBUFFERSCB data;
 
       memset(&data, 0, sizeof data);
