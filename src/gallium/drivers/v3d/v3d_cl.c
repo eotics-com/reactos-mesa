@@ -65,7 +65,7 @@ v3d_cl_ensure_space(struct v3d_cl *cl, uint32_t space, uint32_t alignment)
 
         v3d_bo_unreference(&cl->bo);
         cl->bo = v3d_bo_alloc(cl->job->v3d->screen, space, "CL");
-        cl->base = v3d_bo_map(cl->bo);
+        cl->base = v3d_bo_map_write(cl->bo);
         cl->size = cl->bo->size;
         cl->next = cl->base;
 
@@ -112,7 +112,7 @@ v3d_cl_ensure_space_with_branch(struct v3d_cl *cl, uint32_t space)
         }
 
         cl->bo = new_bo;
-        cl->base = v3d_bo_map(cl->bo);
+        cl->base = v3d_bo_map_write(cl->bo);
         /* Take only into account the usable size of the BO to guarantee that
          * we never write in the last bytes of the CL buffer because of the
          * readahead of the CLE

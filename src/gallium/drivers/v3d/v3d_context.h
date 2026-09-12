@@ -37,7 +37,11 @@
 #include "util/slab.h"
 #include "util/u_dynarray.h"
 #include "util/u_framebuffer.h"
+#ifdef _WIN32
+#include "broadcom/common/v3d_d3dkmt.h"
+#else
 #include "xf86drm.h"
+#endif
 #include "drm-uapi/v3d_drm.h"
 #include "v3d_screen.h"
 #include "broadcom/common/v3d_limits.h"

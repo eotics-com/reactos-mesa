@@ -72,6 +72,9 @@
 #ifdef GALLIUM_VC4
 #include "vc4/d3dkmt/vc4_d3dkmt_public.h"
 #endif
+#ifdef GALLIUM_V3D
+#include "v3d/d3dkmt/v3d_d3dkmt_public.h"
+#endif
 
 #ifdef GALLIUM_LLVMPIPE
 static bool use_llvmpipe = false;
@@ -85,10 +88,13 @@ static bool use_zink = false;
 #ifdef GALLIUM_VC4
 static bool use_vc4 = false;
 #endif
+#ifdef GALLIUM_V3D
+static bool use_v3d = false;
+#endif
 
 static const char *created_driver_name = NULL;
 
-#ifdef GALLIUM_VC4
+#if defined(GALLIUM_VC4) || defined(GALLIUM_V3D)
 struct stw_shared_surface {
    struct pipe_resource *resource;
 };
@@ -127,6 +133,13 @@ wgl_screen_create_by_name(HDC hDC, const char* driver, struct sw_winsys *winsys)
          use_vc4 = true;
    }
 #endif
+#ifdef GALLIUM_V3D
+   if (strcmp(driver, "v3d") == 0) {
+      screen = v3d_d3dkmt_screen_create(NULL);
+      if (screen)
+         use_v3d = true;
+   }
+#endif
 #ifdef GALLIUM_SOFTPIPE
    if (strcmp(driver, "softpipe") == 0) {
       screen = softpipe_create_screen(winsys);
@@ -151,6 +164,9 @@ wgl_screen_create(HDC hDC)
 #ifdef GALLIUM_VC4
       sw_only ? "" : "vc4",
 #endif
+#ifdef GALLIUM_V3D
+      sw_only ? "" : "v3d",
+#endif
 #ifdef GALLIUM_D3D12
       sw_only ? "" : "d3d12",
 #endif
@@ -174,6 +190,10 @@ wgl_screen_create(HDC hDC)
          created_driver_name = drivers[i];
 #ifdef GALLIUM_VC4
          if (use_vc4)
+            winsys->destroy(winsys);
+#endif
+#ifdef GALLIUM_V3D
+         if (use_v3d)
             winsys->destroy(winsys);
 #endif
          return screen;
@@ -238,6 +258,12 @@ wgl_present(struct pipe_screen *screen,
       return;
    }
 #endif
+#ifdef GALLIUM_V3D
+   if (use_v3d) {
+      screen->flush_frontbuffer(screen, ctx, res, 0, 0, hDC, 0, NULL);
+      return;
+   }
+#endif
 
 #ifdef GALLIUM_SOFTPIPE
    winsys = softpipe_screen(screen)->winsys,
@@ -280,7 +306,7 @@ wgl_get_name(void)
    return created_driver_name;
 }
 
-#ifdef GALLIUM_VC4
+#if defined(GALLIUM_VC4) || defined(GALLIUM_V3D)
 static struct stw_shared_surface *
 wgl_shared_surface_open(struct pipe_screen *screen,
                         HANDLE shared_handle,
@@ -315,6 +341,22 @@ wgl_shared_surface_open(struct pipe_screen *screen,
    whandle.handle = shared_handle;
    whandle.stride = width * 4;
    whandle.modifier = DRM_FORMAT_MOD_LINEAR;
+#ifdef GALLIUM_V3D
+   if (use_v3d) {
+      uint32_t shared_width, shared_height, shared_pitch;
+
+      if (!v3d_d3dkmt_shared_surface_info(screen,
+                                         (uintptr_t)shared_handle,
+                                         &shared_width, &shared_height,
+                                         &shared_pitch) ||
+          shared_width != width || shared_height != height) {
+         FREE(surface);
+         return NULL;
+      }
+      templ.format = PIPE_FORMAT_B8G8R8A8_UNORM;
+      whandle.stride = shared_pitch;
+   }
+#endif
    surface->resource = screen->resource_from_handle(
       screen, &templ, &whandle, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
    if (!surface->resource) {
@@ -383,6 +425,12 @@ wgl_compose(struct pipe_screen *screen,
    if (!fence)
       return false;
 
+#ifdef GALLIUM_V3D
+   if (completion_event && use_v3d)
+      complete = v3d_d3dkmt_fence_signal_event(screen, fence,
+                                               completion_event);
+   else
+#endif
    {
       complete = screen->fence_finish(screen, context, fence,
                                       OS_TIMEOUT_INFINITE);
@@ -418,6 +466,10 @@ wgl_can_compose(void)
    if (use_vc4)
       return true;
 #endif
+#ifdef GALLIUM_V3D
+   if (use_v3d)
+      return true;
+#endif
    return false;
 }
 
@@ -429,7 +481,7 @@ static const struct stw_winsys stw_winsys = {
 #else
    NULL, /* get_adapter_luid */
 #endif
-#ifdef GALLIUM_VC4
+#if defined(GALLIUM_VC4) || defined(GALLIUM_V3D)
    &wgl_shared_surface_open,
    &wgl_shared_surface_close,
    &wgl_compose,
