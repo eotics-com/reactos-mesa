@@ -44,6 +44,9 @@ v3d_init_cl(struct v3d_job *job, struct v3d_cl *cl)
 uint32_t
 v3d_cl_ensure_space(struct v3d_cl *cl, uint32_t space, uint32_t alignment)
 {
+        if (cl->job->out_of_memory)
+                return UINT32_MAX;
+
         uint32_t offset = align(cl_offset(cl), alignment);
 
         if (offset + space <= cl->size) {
@@ -63,8 +66,13 @@ v3d_cl_ensure_space(struct v3d_cl *cl, uint32_t space, uint32_t alignment)
                 space = MAX2(MIN2(cl->bo->size * 2, V3D_CL_MAX_GROW_SIZE),
                              space);
 
+        struct v3d_bo *new_bo = v3d_bo_alloc(cl->job->v3d->screen, space, "CL");
+        if (!new_bo) {
+                cl->job->out_of_memory = true;
+                return UINT32_MAX;
+        }
         v3d_bo_unreference(&cl->bo);
-        cl->bo = v3d_bo_alloc(cl->job->v3d->screen, space, "CL");
+        cl->bo = new_bo;
         cl->base = v3d_bo_map_write(cl->bo);
         cl->size = cl->bo->size;
         cl->next = cl->base;
@@ -72,11 +80,13 @@ v3d_cl_ensure_space(struct v3d_cl *cl, uint32_t space, uint32_t alignment)
         return 0;
 }
 
-void
+bool
 v3d_cl_ensure_space_with_branch(struct v3d_cl *cl, uint32_t space)
 {
-        if (cl_offset(cl) + space  <= cl->size)
-                return;
+        if (cl->job->out_of_memory)
+                return false;
+        if (cl_offset(cl) + space <= cl->size)
+                return true;
 
         /* The last V3D_CLE_READAHEAD bytes of the buffer are unusable, so we
          * need to take them into account when allocating a new BO for the
@@ -97,6 +107,11 @@ v3d_cl_ensure_space_with_branch(struct v3d_cl *cl, uint32_t space)
                              space);
 
         struct v3d_bo *new_bo = v3d_bo_alloc(cl->job->v3d->screen, space, "CL");
+
+        if (!new_bo) {
+                cl->job->out_of_memory = true;
+                return false;
+        }
 
         /* Chain to the new BO from the old one. */
         if (cl->bo) {
@@ -119,6 +134,7 @@ v3d_cl_ensure_space_with_branch(struct v3d_cl *cl, uint32_t space)
          */
         cl->size = cl->bo->size - unusable_size;
         cl->next = cl->base;
+        return true;
 }
 
 void

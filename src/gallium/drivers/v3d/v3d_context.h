@@ -509,6 +509,9 @@ struct v3d_job {
          */
         bool needs_flush;
 
+        /* Failed command storage must never reach the GPU. */
+        bool out_of_memory;
+
         /* Set if any shader has dirtied cachelines in the TMU that need to be
          * flushed before job end.
          */

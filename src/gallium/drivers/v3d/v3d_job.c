@@ -553,7 +553,7 @@ v3d_read_and_accumulate_primitive_counters(struct v3d_context *v3d)
         }
 }
 
-static void
+static bool
 alloc_tile_state(struct v3d_job *job)
 {
         assert(!job->tile_alloc && !job->tile_state);
@@ -569,8 +569,11 @@ alloc_tile_state(struct v3d_job *job)
 
         job->tile_alloc = v3d_bo_alloc(job->v3d->screen, tile_alloc_size,
                                        "tile_alloc");
+        if (!job->tile_alloc)
+                return false;
         job->tile_state = v3d_bo_alloc(job->v3d->screen, tile_state_size,
                                        "TSDA");
+        return job->tile_state != NULL;
 }
 
 static void
@@ -634,6 +637,8 @@ v3d_job_submit(struct v3d_context *v3d, struct v3d_job *job)
 
         MESA_TRACE_FUNC();
 
+        if (job->out_of_memory)
+                goto out_of_memory;
         if (!job->needs_flush)
                 goto done;
 
@@ -649,12 +654,17 @@ v3d_job_submit(struct v3d_context *v3d, struct v3d_job *job)
 
         enable_double_buffer_mode(job);
 
-        alloc_tile_state(job);
+        if (!alloc_tile_state(job))
+                goto out_of_memory;
 
         v3d_X(devinfo, emit_rcl)(job);
+        if (job->out_of_memory)
+                goto out_of_memory;
 
         if (cl_offset(&job->bcl) > 0)
                 v3d_X(devinfo, bcl_epilogue)(v3d, job);
+        if (job->out_of_memory)
+                goto out_of_memory;
 
 #ifndef _WIN32
         if (v3d->in_fence_fd >= 0) {
@@ -761,6 +771,12 @@ v3d_job_submit(struct v3d_context *v3d, struct v3d_job *job)
                         v3d_read_and_accumulate_primitive_counters(v3d);
         }
 
+        goto done;
+
+out_of_memory:
+        util_debug_message(&v3d->base.debug, OUT_OF_MEMORY,
+                           "Unable to allocate V3D render job storage");
+        mesa_loge_once("Unable to allocate V3D render job storage");
 done:
         if (v3d->job == job)
                 v3d->submitted_any_jobs_for_current_fbo = true;
