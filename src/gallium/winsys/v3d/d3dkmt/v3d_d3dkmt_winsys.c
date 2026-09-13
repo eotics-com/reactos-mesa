@@ -27,6 +27,7 @@
 
 #include "broadcom/common/v3d_d3dkmt.h"
 #include "broadcom/common/v3d_tfu.h"
+#include "broadcom/common/v3d_tiling.h"
 #include "v3d/v3d_screen.h"
 #include "v3d_d3dkmt_public.h"
 
@@ -126,6 +127,8 @@ vc4kmt_status vc4kmt_primary_gpuva(VC4KMT_DEVICE *device,
                                    uint32_t width, uint32_t height,
                                    uint32_t pitch, uint32_t *gpu_va);
 uint32_t vc4kmt_primary_allocation(const VC4KMT_DEVICE *device);
+vc4kmt_status vc4kmt_primary_present(VC4KMT_DEVICE *device, void *window,
+                                      const VC4KMT_FENCE *fence);
 void vc4kmt_primary_invalidate(VC4KMT_DEVICE *device);
 vc4kmt_status vc4kmt_bo_destroy(VC4KMT_DEVICE *device, VC4KMT_BO *bo);
 vc4kmt_status vc4kmt_submit_cl(VC4KMT_DEVICE *device,
@@ -873,9 +876,11 @@ v3d_d3dkmt_bo_invalidate(int fd, uint32_t handle)
 }
 
 int
-v3d_d3dkmt_present_linear(int fd, uint32_t source_handle,
+v3d_d3dkmt_present_linear(int fd, uintptr_t window, uint32_t source_handle,
                            uint32_t out_sync, uint32_t source_offset,
                            uint32_t source_stride,
+                           uint32_t source_padded_height,
+                           uint32_t source_tiling, uint32_t source_size,
                            uint32_t destination_x, uint32_t destination_y,
                            uint32_t width, uint32_t height,
                            uint32_t screen_width, uint32_t screen_height)
@@ -892,21 +897,22 @@ v3d_d3dkmt_present_linear(int fd, uint32_t source_handle,
    VC4KMT_FENCE fence;
    int result = -1;
 
-   if (!device || !source_handle || !out_sync || !width || !height ||
+   if (!device || !window || !source_handle || !out_sync || !width || !height ||
        width > UINT16_MAX || height > UINT16_MAX ||
        screen_width > UINT16_MAX ||
        destination_x > screen_width || destination_y > screen_height ||
        width > screen_width - destination_x ||
        height > screen_height - destination_y ||
+       source_tiling > V3D_TILING_UIF_XOR ||
+       source_padded_height < height ||
+       (uint64_t)source_stride * source_padded_height > source_size ||
        source_stride < width * 4 || (source_stride & 3)) {
       errno = EINVAL;
       return -1;
    }
 
    primary_pitch = screen_width * 4;
-   source_end = (uint64_t)source_offset +
-                (uint64_t)(height - 1) * source_stride +
-                (uint64_t)width * 4;
+   source_end = (uint64_t)source_offset + source_size;
    destination_offset = (uint64_t)destination_y * primary_pitch +
                         (uint64_t)destination_x * 4;
 
@@ -946,11 +952,19 @@ v3d_d3dkmt_present_linear(int fd, uint32_t source_handle,
    resources[1].allocation = primary_allocation;
    resources[1].flags = 0;
 
-   submit.regs[0] =
-      (V3D71_TFU_ICFG_FORMAT_RASTER << V3D71_TFU_ICFG_IFORMAT_SHIFT) |
-      (V3D71_TFU_TEXTURE_FORMAT_R32F << V3D71_TFU_ICFG_OTYPE_SHIFT);
+   /* Use the same input layout and UIF block-row stride as v3dx_tfu.
+    * The compositor keeps its render target tiled; scanout stays raster. */
+   uint32_t input_format = source_tiling == V3D_TILING_RASTER ?
+      V3D71_TFU_ICFG_FORMAT_RASTER :
+      V3D71_TFU_ICFG_FORMAT_LINEARTILE + source_tiling - V3D_TILING_LINEARTILE;
+   submit.regs[0] = (input_format << V3D71_TFU_ICFG_IFORMAT_SHIFT) |
+                    (V3D71_TFU_TEXTURE_FORMAT_R32F << V3D71_TFU_ICFG_OTYPE_SHIFT);
    submit.regs[1] = source->kmt.gpu_va + source_offset;
-   submit.regs[3] = source_stride / 4;
+   if (source_tiling == V3D_TILING_RASTER)
+      submit.regs[3] = source_stride / 4;
+   else if (source_tiling == V3D_TILING_UIF_NO_XOR ||
+            source_tiling == V3D_TILING_UIF_XOR)
+      submit.regs[3] = source_padded_height / (2 * v3d_utile_height(4));
    submit.regs[5] =
       (V3D71_TFU_IOC_FORMAT_RASTER << V3D71_TFU_IOC_FORMAT_SHIFT) |
       ((primary_pitch / 4) << V3D71_TFU_IOC_STRIDE_SHIFT);
@@ -969,6 +983,14 @@ v3d_d3dkmt_present_linear(int fd, uint32_t source_handle,
    result = v3d_d3dkmt_store_submit_fence_locked(device, out_sync,
                                                    &source_handle, 1,
                                                    VC4KMT_ENGINE_TFU, &fence);
+   if (!result) {
+      vc4kmt_status present_status =
+         vc4kmt_primary_present(device->kmt, (void *)window, &fence);
+      if (present_status != 0) {
+         errno = EIO;
+         result = -1;
+      }
+   }
 
 done:
    mtx_unlock(&device->lock);

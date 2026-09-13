@@ -103,14 +103,14 @@ stw_AddSwapHintRectWIN(GLint x, GLint y, GLsizei width, GLsizei height)
    stw_framebuffer_unlock(fb);
 }
 
-static void
+static bool
 stw_present_region(struct pipe_screen *screen, struct pipe_context *pipe,
                    struct pipe_resource *res, HDC hdc, const RECT *damage)
 {
-   if (damage && stw_dev->stw_winsys->present_region)
-      stw_dev->stw_winsys->present_region(screen, pipe, res, hdc, damage);
-   else
-      stw_dev->stw_winsys->present(screen, pipe, res, hdc);
+   if (stw_dev->stw_winsys->present_region)
+      return stw_dev->stw_winsys->present_region(screen, pipe, res, hdc, damage);
+   stw_dev->stw_winsys->present(screen, pipe, res, hdc);
+   return true;
 }
 
 
@@ -716,8 +716,13 @@ stw_present_buffers(HDC hdc, LPPRESENTBUFFERS data, HANDLE completion_event)
          }
       }
       else {
-         stw_present_region(screen, pipe, res, hdc,
-                            present->has_damage ? &present->damage : NULL);
+         if (!stw_present_region(screen, pipe, res, hdc,
+                                 present->has_damage ? &present->damage : NULL)) {
+            stw_framebuffer_update(fb);
+            stw_notify_current_locked(fb);
+            stw_framebuffer_unlock(fb);
+            return false;
+         }
          if (completion_event && !SetEvent(completion_event)) {
             stw_framebuffer_update(fb);
             stw_notify_current_locked(fb);
@@ -820,14 +825,14 @@ stw_framebuffer_present_locked(HDC hdc,
       struct stw_context *ctx = stw_current_context();
       struct pipe_context *pipe = ctx ? ctx->st->pipe : NULL;
 
-      stw_present_region(screen, pipe, res, hdc,
-                         present.has_damage ? &present.damage : NULL);
+      BOOL result = stw_present_region(screen, pipe, res, hdc,
+                                       present.has_damage ? &present.damage : NULL);
 
       stw_framebuffer_update(fb);
       stw_notify_current_locked(fb);
       stw_framebuffer_unlock(fb);
 
-      return true;
+      return result;
    }
 }
 

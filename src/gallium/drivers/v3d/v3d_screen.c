@@ -45,6 +45,7 @@
 
 #ifdef _WIN32
 #include "broadcom/common/v3d_d3dkmt.h"
+#include "gallium/winsys/v3d/d3dkmt/v3d_d3dkmt_public.h"
 #else
 #include <xf86drm.h>
 #endif
@@ -162,13 +163,12 @@ v3d_get_direct_present_origin(HDC hdc, unsigned width, unsigned height,
         return true;
 }
 
-static void
-v3d_screen_flush_frontbuffer(struct pipe_screen *pscreen,
+bool
+v3d_d3dkmt_present_frontbuffer(struct pipe_screen *pscreen,
                              struct pipe_context *ctx,
                              struct pipe_resource *resource,
                              unsigned level, unsigned layer,
-                             void *winsys_drawable_handle,
-                             unsigned nboxes, struct pipe_box *subbox)
+                             void *winsys_drawable_handle)
 {
         struct v3d_resource *rsc = v3d_resource(resource);
         BITMAPV5HEADER bitmap = { 0 };
@@ -180,14 +180,10 @@ v3d_screen_flush_frontbuffer(struct pipe_screen *pscreen,
         unsigned screen_height;
         const uint8_t *pixels;
 
-        (void)pscreen;
-        (void)ctx;
-        (void)nboxes;
-        (void)subbox;
-
         if (!winsys_drawable_handle || level >= V3D_MAX_MIP_LEVELS ||
-            layer >= resource->array_size || rsc->cpp != 4 || rsc->tiled)
-                return;
+            layer >= resource->array_size || rsc->cpp != 4 ||
+            resource->nr_samples > 1)
+                return false;
 
         switch (resource->format) {
         case PIPE_FORMAT_B8G8R8X8_UNORM:
@@ -202,13 +198,18 @@ v3d_screen_flush_frontbuffer(struct pipe_screen *pscreen,
                                                   &screen_width,
                                                   &screen_height) &&
                     !v3d_d3dkmt_present_linear(
-                            v3d_screen(pscreen)->fd, rsc->bo->handle,
+                            v3d_screen(pscreen)->fd,
+                            (uintptr_t)WindowFromDC(winsys_drawable_handle),
+                            rsc->bo->handle,
                             v3d_context(ctx)->out_sync,
                             v3d_layer_offset(resource, level, layer),
                             rsc->slices[level].stride,
+                            rsc->slices[level].padded_height,
+                            rsc->slices[level].tiling,
+                            rsc->slices[level].size,
                             destination_x, destination_y,
                             width, height, screen_width, screen_height))
-                        return;
+                        return true;
                 break;
         case PIPE_FORMAT_R8G8B8X8_UNORM:
         case PIPE_FORMAT_R8G8B8A8_UNORM:
@@ -224,11 +225,19 @@ v3d_screen_flush_frontbuffer(struct pipe_screen *pscreen,
                 bitmap.bV5BlueMask = 0x3ff00000;
                 break;
         default:
-                return;
+                return false;
         }
 
-        pixels = (const uint8_t *)v3d_bo_map(rsc->bo) +
-                 v3d_layer_offset(resource, level, layer);
+        /* A tiled allocation is not a DIB. The compositor must also retain
+         * the error instead of claiming a GDI copy presented its frame. */
+        if (rsc->tiled ||
+            GetPropW(WindowFromDC(winsys_drawable_handle), L"ReactOS.Dwm.GpuOutput"))
+                return false;
+
+        pixels = v3d_bo_map(rsc->bo);
+        if (!pixels)
+                return false;
+        pixels += v3d_layer_offset(resource, level, layer);
         bitmap.bV5Size = sizeof(bitmap);
         bitmap.bV5Width = rsc->slices[level].stride / rsc->cpp;
         bitmap.bV5Height = -(LONG)height;
@@ -247,12 +256,26 @@ v3d_screen_flush_frontbuffer(struct pipe_screen *pscreen,
                                0, 0, 0, height,
                                pixels, (const BITMAPINFO *)&bitmap,
                                DIB_RGB_COLORS)) {
-                StretchDIBits(winsys_drawable_handle,
+                int result = StretchDIBits(winsys_drawable_handle,
                               0, 0, width, height,
                               0, 0, width, height,
                               pixels, (const BITMAPINFO *)&bitmap,
                               DIB_RGB_COLORS, SRCCOPY);
+                return result != 0 && result != GDI_ERROR;
         }
+        return true;
+}
+
+static void
+v3d_screen_flush_frontbuffer(struct pipe_screen *pscreen,
+                             struct pipe_context *ctx,
+                             struct pipe_resource *resource,
+                             unsigned level, unsigned layer,
+                             void *winsys_drawable_handle,
+                             unsigned nboxes, struct pipe_box *subbox)
+{
+        v3d_d3dkmt_present_frontbuffer(pscreen, ctx, resource, level, layer,
+                                       winsys_drawable_handle);
 }
 #endif
 

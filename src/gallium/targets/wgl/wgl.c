@@ -442,21 +442,27 @@ wgl_compose(struct pipe_screen *screen,
 }
 #endif
 
-static void
+static bool
 wgl_present_region(struct pipe_screen *screen, struct pipe_context *ctx,
                    struct pipe_resource *res, HDC hdc, const RECT *damage)
 {
 #ifdef GALLIUM_VC4
-   if (use_vc4 && damage) {
+   if (use_vc4) {
       struct pipe_box box;
-      u_box_2d(damage->left, damage->top,
-               damage->right - damage->left,
-               damage->bottom - damage->top, &box);
-      screen->flush_frontbuffer(screen, ctx, res, 0, 0, hdc, 1, &box);
-      return;
+      if (damage)
+         u_box_2d(damage->left, damage->top,
+                  damage->right - damage->left,
+                  damage->bottom - damage->top, &box);
+      return vc4_d3dkmt_present(screen, ctx, res, 0, 0, hdc,
+                                damage ? 1 : 0, damage ? &box : NULL);
    }
 #endif
+#ifdef GALLIUM_V3D
+   if (use_v3d)
+      return v3d_d3dkmt_present_frontbuffer(screen, ctx, res, 0, 0, hdc);
+#endif
    wgl_present(screen, ctx, res, hdc);
+   return true;
 }
 
 static bool
