@@ -42,6 +42,25 @@
 #include "util/u_rect.h"
 #include "util/u_surface.h"
 
+EXTERN_C struct pipe_resource *
+d3d10_create_resource(struct pipe_screen *screen,
+                      const struct pipe_resource *templ,
+                      const D3D10GalliumResourceDesc *desc,
+                      void *runtime_resource,
+                      D3DKMT_HANDLE *allocation);
+
+EXTERN_C bool
+d3d10_get_open_resource_desc(
+   const D3D10DDIARG_OPENRESOURCE *open_resource,
+   D3D10GalliumResourceDesc *desc);
+
+EXTERN_C struct pipe_resource *
+d3d10_open_resource(struct pipe_screen *screen,
+                    const struct pipe_resource *templ,
+                    const D3D10DDIARG_OPENRESOURCE *open_resource,
+                    void *runtime_resource,
+                    D3DKMT_HANDLE *allocation);
+
 
 /*
  * ----------------------------------------------------------------------
@@ -267,6 +286,26 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    pResource->Format = pCreateResource->Format;
    pResource->MipLevels = pCreateResource->MipLevels;
 
+   D3D10GalliumResourceDesc desc;
+
+   memset(&desc, 0, sizeof(desc));
+   desc.ResourceDimension = pCreateResource->ResourceDimension;
+   desc.Usage = pCreateResource->Usage;
+   desc.BindFlags = pCreateResource->BindFlags;
+   desc.MapFlags = pCreateResource->MapFlags;
+   desc.MiscFlags = pCreateResource->MiscFlags;
+   desc.Format = pCreateResource->Format;
+   desc.SampleDesc = pCreateResource->SampleDesc;
+   desc.MipLevels = pCreateResource->MipLevels;
+   desc.ArraySize = pCreateResource->ArraySize;
+   desc.Width = pCreateResource->pMipInfoList[0].TexelWidth;
+   desc.Height = pCreateResource->pMipInfoList[0].TexelHeight;
+   desc.Depth = pCreateResource->pMipInfoList[0].TexelDepth;
+   desc.Primary = pCreateResource->pPrimaryDesc != NULL;
+   desc.PrimaryVidPnSourceId = desc.Primary ?
+      pCreateResource->pPrimaryDesc->VidPnSourceId :
+      D3DDDI_ID_UNINITIALIZED;
+
    struct pipe_resource templat;
 
    memset(&templat, 0, sizeof templat);
@@ -274,14 +313,6 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    templat.target     = translate_texture_target( pCreateResource->ResourceDimension,
                                                   pCreateResource->ArraySize );
    pResource->buffer = templat.target == PIPE_BUFFER;
-
-   if (pCreateResource->Format == DXGI_FORMAT_UNKNOWN) {
-      assert(pCreateResource->ResourceDimension == D3D10DDIRESOURCE_BUFFER);
-      templat.format = PIPE_FORMAT_R8_UINT;
-   } else {
-      BOOL bindDepthStencil = !!(pCreateResource->BindFlags & D3D10_DDI_BIND_DEPTH_STENCIL);
-      templat.format = FormatTranslate(pCreateResource->Format, bindDepthStencil);
-   }
 
    templat.width0     = pCreateResource->pMipInfoList[0].TexelWidth;
    templat.height0    = pCreateResource->pMipInfoList[0].TexelHeight;
@@ -291,24 +322,39 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    templat.nr_samples = pCreateResource->SampleDesc.Count;
    templat.nr_storage_samples = pCreateResource->SampleDesc.Count;
    templat.bind       = translate_resource_flags(pCreateResource->BindFlags);
+   if (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)
+      templat.bind |= PIPE_BIND_SHARED;
+   if (desc.Primary)
+      templat.bind |= PIPE_BIND_SCANOUT;
    templat.usage      = translate_resource_usage(pCreateResource->Usage);
 
-   if (templat.target != PIPE_BUFFER) {
-      if (!screen->is_format_supported(screen,
-                                       templat.format,
-                                       templat.target,
-                                       templat.nr_samples,
-                                       templat.nr_storage_samples,
-                                       templat.bind)) {
-         debug_printf("%s: unsupported format %s\n",
-                     __func__, util_format_name(templat.format));
-         SetError(hDevice, E_OUTOFMEMORY);
+   if (pCreateResource->Format == DXGI_FORMAT_UNKNOWN) {
+      assert(templat.target == PIPE_BUFFER);
+      templat.format = PIPE_FORMAT_R8_UINT;
+   } else if (templat.target == PIPE_BUFFER) {
+      templat.format = FormatTranslate(pCreateResource->Format, false);
+   } else {
+      const BOOL bindDepthStencil =
+         !!(pCreateResource->BindFlags & D3D10_DDI_BIND_DEPTH_STENCIL);
+      templat.format = FormatTranslateSupported(screen,
+                                                pCreateResource->Format,
+                                                bindDepthStencil,
+                                                templat.target,
+                                                templat.nr_samples,
+                                                templat.bind);
+      if (templat.format == PIPE_FORMAT_NONE) {
+         SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
          return;
       }
    }
 
-   pResource->resource = screen->resource_create(screen, &templat);
-   if (!pResource) {
+   pResource->runtime_resource = (HANDLE)hRTResource.handle;
+   pResource->resource = d3d10_create_resource(screen,
+                                               &templat,
+                                               &desc,
+                                               pResource->runtime_resource,
+                                               &pResource->allocation);
+   if (!pResource->resource) {
       DebugPrintf("%s: failed to create resource\n", __func__);
       SetError(hDevice, E_OUTOFMEMORY);
       return;
@@ -317,6 +363,11 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    pResource->NumSubResources = pCreateResource->MipLevels * pCreateResource->ArraySize;
    pResource->transfers = (struct pipe_transfer **)calloc(pResource->NumSubResources,
                                                           sizeof *pResource->transfers);
+   if (!pResource->transfers) {
+      pipe_resource_reference(&pResource->resource, NULL);
+      SetError(hDevice, E_OUTOFMEMORY);
+      return;
+   }
 
    if (pCreateResource->pInitialDataUP) {
       if (pResource->buffer) {
@@ -418,8 +469,109 @@ OpenResource(D3D10DDI_HDEVICE hDevice,                            // IN
              D3D10DDI_HRESOURCE hResource,                        // IN
              D3D10DDI_HRTRESOURCE hRTResource)                    // IN
 {
-   LOG_UNSUPPORTED_ENTRYPOINT();
-   SetError(hDevice, E_OUTOFMEMORY);
+   LOG_ENTRYPOINT();
+
+   struct pipe_context *pipe = CastPipeContext(hDevice);
+   struct pipe_screen *screen = pipe->screen;
+   Resource *pResource = CastResource(hResource);
+   D3D10GalliumResourceDesc desc;
+   struct pipe_resource templat;
+
+   memset(pResource, 0, sizeof(*pResource));
+   memset(&desc, 0, sizeof(desc));
+   memset(&templat, 0, sizeof(templat));
+
+   if (!pOpenResource ||
+       !d3d10_get_open_resource_desc(pOpenResource, &desc) ||
+       !desc.Width || !desc.Height || !desc.Depth ||
+       !desc.ArraySize || !desc.MipLevels || !desc.SampleDesc.Count ||
+       desc.MipLevels > UINT_MAX / desc.ArraySize) {
+      SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
+      return;
+   }
+
+   switch (desc.ResourceDimension) {
+   case D3D10DDIRESOURCE_BUFFER:
+      if (desc.ArraySize != 1)
+         goto unsupported;
+      break;
+   case D3D10DDIRESOURCE_TEXTURE1D:
+   case D3D10DDIRESOURCE_TEXTURE2D:
+      break;
+   case D3D10DDIRESOURCE_TEXTURE3D:
+      if (desc.ArraySize != 1)
+         goto unsupported;
+      break;
+   case D3D10DDIRESOURCE_TEXTURECUBE:
+      if (desc.ArraySize % 6)
+         goto unsupported;
+      break;
+   default:
+      goto unsupported;
+   }
+
+   pResource->Format = desc.Format;
+   pResource->MipLevels = desc.MipLevels;
+   templat.target = translate_texture_target(desc.ResourceDimension,
+                                             desc.ArraySize);
+   pResource->buffer = templat.target == PIPE_BUFFER;
+   templat.width0 = desc.Width;
+   templat.height0 = desc.Height;
+   templat.depth0 = desc.Depth;
+   templat.array_size = desc.ArraySize;
+   templat.last_level = desc.MipLevels - 1;
+   templat.nr_samples = desc.SampleDesc.Count;
+   templat.nr_storage_samples = desc.SampleDesc.Count;
+   templat.bind = translate_resource_flags(desc.BindFlags);
+   if (desc.MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)
+      templat.bind |= PIPE_BIND_SHARED;
+   if (desc.Primary)
+      templat.bind |= PIPE_BIND_SCANOUT;
+   templat.usage = translate_resource_usage(desc.Usage);
+
+   if (desc.Format == DXGI_FORMAT_UNKNOWN) {
+      if (templat.target != PIPE_BUFFER)
+         goto unsupported;
+      templat.format = PIPE_FORMAT_R8_UINT;
+   } else if (templat.target == PIPE_BUFFER) {
+      templat.format = FormatTranslate(desc.Format, false);
+   } else {
+      const BOOL bindDepthStencil =
+         !!(desc.BindFlags & D3D10_DDI_BIND_DEPTH_STENCIL);
+      templat.format = FormatTranslateSupported(screen,
+                                                desc.Format,
+                                                bindDepthStencil,
+                                                templat.target,
+                                                templat.nr_samples,
+                                                templat.bind);
+      if (templat.format == PIPE_FORMAT_NONE)
+         goto unsupported;
+   }
+
+   pResource->runtime_resource = (HANDLE)hRTResource.handle;
+   pResource->resource = d3d10_open_resource(screen,
+                                             &templat,
+                                             pOpenResource,
+                                             pResource->runtime_resource,
+                                             &pResource->allocation);
+   if (!pResource->resource || !pResource->allocation) {
+      if (pResource->resource)
+         pipe_resource_reference(&pResource->resource, NULL);
+      SetError(hDevice, E_OUTOFMEMORY);
+      return;
+   }
+
+   pResource->NumSubResources = desc.MipLevels * desc.ArraySize;
+   pResource->transfers = (struct pipe_transfer **)calloc(
+      pResource->NumSubResources, sizeof(*pResource->transfers));
+   if (!pResource->transfers) {
+      pipe_resource_reference(&pResource->resource, NULL);
+      SetError(hDevice, E_OUTOFMEMORY);
+   }
+   return;
+
+unsupported:
+   SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
 }
 
 
@@ -801,7 +953,28 @@ ResourceResolveSubResource(D3D10DDI_HDEVICE hDevice,        // IN
                            UINT SrcSubResource,             // IN
                            DXGI_FORMAT ResolveFormat)       // IN
 {
-   LOG_UNSUPPORTED_ENTRYPOINT();
+   struct pipe_context *pipe = CastPipeContext(hDevice);
+   struct pipe_resource *dst = CastPipeResource(hDstResource);
+   struct pipe_resource *src = CastPipeResource(hSrcResource);
+   if (!dst || !src || src->nr_samples <= 1 || dst->nr_samples > 1)
+      return;
+
+   struct pipe_blit_info blit = {};
+   blit.src.resource = src;
+   blit.dst.resource = dst;
+   blit.src.level = SrcSubResource % (src->last_level + 1);
+   blit.dst.level = DstSubResource % (dst->last_level + 1);
+   blit.src.box.z = SrcSubResource / (src->last_level + 1);
+   blit.dst.box.z = DstSubResource / (dst->last_level + 1);
+   blit.src.box.width = u_minify(src->width0, blit.src.level);
+   blit.src.box.height = u_minify(src->height0, blit.src.level);
+   blit.dst.box.width = u_minify(dst->width0, blit.dst.level);
+   blit.dst.box.height = u_minify(dst->height0, blit.dst.level);
+   blit.src.box.depth = blit.dst.box.depth = 1;
+   blit.src.format = blit.dst.format = FormatTranslate(ResolveFormat, false);
+   blit.mask = PIPE_MASK_RGBA;
+   blit.filter = PIPE_TEX_FILTER_NEAREST;
+   pipe->blit(pipe, &blit);
 }
 
 
@@ -937,4 +1110,3 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
       }
    }
 }
-

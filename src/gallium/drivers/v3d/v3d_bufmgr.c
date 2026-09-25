@@ -86,7 +86,8 @@ v3d_bo_remove_from_cache(struct v3d_bo_cache *cache, struct v3d_bo *bo)
 }
 
 static struct v3d_bo *
-v3d_bo_from_cache(struct v3d_screen *screen, uint32_t size, const char *name)
+v3d_bo_from_cache(struct v3d_screen *screen, uint32_t size, const char *name,
+                  bool cpu_cached)
 {
         struct v3d_bo_cache *cache = &screen->bo_cache;
         uint32_t page_index = size / 4096 - 1;
@@ -96,10 +97,15 @@ v3d_bo_from_cache(struct v3d_screen *screen, uint32_t size, const char *name)
 
         struct v3d_bo *bo = NULL;
         mtx_lock(&cache->lock);
-        if (!list_is_empty(&cache->size_list[page_index])) {
-                bo = list_first_entry(&cache->size_list[page_index],
-                                      struct v3d_bo, size_list);
+        list_for_each_entry(struct v3d_bo, entry,
+                            &cache->size_list[page_index], size_list) {
+                if (entry->cpu_cached == cpu_cached) {
+                        bo = entry;
+                        break;
+                }
+        }
 
+        if (bo) {
                 /* Check that the BO has gone idle.  If not, then we want to
                  * allocate something new instead, since we assume that the
                  * user will proceed to CPU map it and fill it with stuff.
@@ -118,11 +124,18 @@ v3d_bo_from_cache(struct v3d_screen *screen, uint32_t size, const char *name)
         return bo;
 }
 
-struct v3d_bo *
-v3d_bo_alloc(struct v3d_screen *screen, uint32_t size, const char *name)
+static struct v3d_bo *
+v3d_bo_alloc_with_policy(struct v3d_screen *screen, uint32_t size,
+                         const char *name, bool cpu_cached)
 {
-        struct v3d_bo *bo;
-        int ret;
+   struct v3d_bo *bo;
+   int ret;
+#ifdef _WIN32
+   bool runtime_resource =
+      v3d_d3dkmt_runtime_resource_pending(screen->fd);
+#else
+   bool runtime_resource = false;
+#endif
 
         /* The CLIF dumping requires that there is no whitespace in the name.
          */
@@ -130,7 +143,8 @@ v3d_bo_alloc(struct v3d_screen *screen, uint32_t size, const char *name)
 
         size = align(size, 4096);
 
-        bo = v3d_bo_from_cache(screen, size, name);
+   bo = runtime_resource ? NULL :
+      v3d_bo_from_cache(screen, size, name, cpu_cached);
         if (bo) {
                 if (dump_stats) {
                         mesa_logd("Allocated %s %dkb from cache:", name, size / 1024);
@@ -147,10 +161,16 @@ v3d_bo_alloc(struct v3d_screen *screen, uint32_t size, const char *name)
         bo->screen = screen;
         bo->size = size;
         bo->name = name;
-        bo->private = true;
+   /* A BO owned by a D3D runtime resource must retain that WDDM allocation
+    * identity until the runtime asks the UMD to destroy the resource. */
+   bo->private = !runtime_resource;
+        bo->cpu_cached = cpu_cached;
 
         struct drm_v3d_create_bo create = {
-                .size = size
+                .size = size,
+#ifdef _WIN32
+                .flags = cpu_cached ? V3D_D3DKMT_CREATE_BO_CPU_CACHED : 0,
+#endif
         };
 
  retry:
@@ -180,6 +200,21 @@ v3d_bo_alloc(struct v3d_screen *screen, uint32_t size, const char *name)
 
         return bo;
 }
+
+struct v3d_bo *
+v3d_bo_alloc(struct v3d_screen *screen, uint32_t size, const char *name)
+{
+        return v3d_bo_alloc_with_policy(screen, size, name, false);
+}
+
+#ifdef _WIN32
+struct v3d_bo *
+v3d_bo_alloc_cpu_cached(struct v3d_screen *screen, uint32_t size,
+                        const char *name)
+{
+        return v3d_bo_alloc_with_policy(screen, size, name, true);
+}
+#endif
 
 void
 v3d_bo_last_unreference(struct v3d_bo *bo)
@@ -397,6 +432,18 @@ v3d_bo_open_name(struct v3d_screen *screen, uint32_t name)
 }
 
 struct v3d_bo *
+v3d_bo_open_kms(struct v3d_screen *screen, uint32_t handle, uint32_t size)
+{
+        if (!handle || !size) {
+                errno = EINVAL;
+                return NULL;
+        }
+
+        mtx_lock(&screen->bo_handles_mutex);
+        return v3d_bo_open_handle(screen, handle, size);
+}
+
+struct v3d_bo *
 v3d_bo_open_dmabuf(struct v3d_screen *screen, int fd)
 {
 #ifdef _WIN32
@@ -507,8 +554,8 @@ v3d_bo_wait(struct v3d_bo *bo, uint64_t timeout_ns, const char *reason)
         return true;
 }
 
-void *
-v3d_bo_map_unsynchronized(struct v3d_bo *bo)
+static void *
+v3d_bo_map_raw(struct v3d_bo *bo)
 {
         uint64_t offset;
         int ret;
@@ -543,66 +590,55 @@ v3d_bo_map_unsynchronized(struct v3d_bo *bo)
         return bo->map;
 }
 
-void *
-v3d_bo_map(struct v3d_bo *bo)
+static void *
+v3d_bo_map_access(struct v3d_bo *bo, bool synchronized, bool write)
 {
-#ifdef _WIN32
-        int cpu_dirty = v3d_d3dkmt_bo_cpu_dirty(bo->screen->fd, bo->handle);
+        void *map = v3d_bo_map_raw(bo);
 
-        if (cpu_dirty < 0) {
-                fprintf(stderr, "BO CPU ownership query failed\n");
-                abort();
-        }
-#endif
-        void *map = v3d_bo_map_unsynchronized(bo);
-
-        bool ok = v3d_bo_wait(bo, OS_TIMEOUT_INFINITE, "bo map");
-        if (!ok) {
-                mesa_loge("BO wait for map failed");
-                abort();
+        if (synchronized) {
+                bool ok = v3d_bo_wait(bo, OS_TIMEOUT_INFINITE, "bo map");
+                if (!ok) {
+                        mesa_loge("BO wait for map failed");
+                        abort();
+                }
         }
         VG(VALGRIND_MAKE_MEM_DEFINED(map, bo->size));
 
 #ifdef _WIN32
-        if (!cpu_dirty &&
-            v3d_d3dkmt_bo_invalidate(bo->screen->fd, bo->handle) != 0) {
-                fprintf(stderr, "BO cache invalidation failed\n");
+        if (v3d_d3dkmt_bo_prepare_cpu_access(bo->screen->fd, bo->handle,
+                                             write) != 0) {
+                fprintf(stderr, "BO CPU access preparation failed\n");
                 abort();
         }
+#else
+        (void)write;
 #endif
 
         return map;
 }
 
-static void
-v3d_bo_mark_cpu_dirty(struct v3d_bo *bo)
+void *
+v3d_bo_map_unsynchronized(struct v3d_bo *bo)
 {
-#ifdef _WIN32
-        if (v3d_d3dkmt_bo_mark_cpu_dirty(bo->screen->fd, bo->handle) != 0) {
-                fprintf(stderr, "BO CPU ownership update failed\n");
-                abort();
-        }
-#else
-        (void)bo;
-#endif
+        return v3d_bo_map_access(bo, false, false);
+}
+
+void *
+v3d_bo_map(struct v3d_bo *bo)
+{
+        return v3d_bo_map_access(bo, true, false);
 }
 
 void *
 v3d_bo_map_write(struct v3d_bo *bo)
 {
-        void *map = v3d_bo_map(bo);
-
-        v3d_bo_mark_cpu_dirty(bo);
-        return map;
+        return v3d_bo_map_access(bo, true, true);
 }
 
 void *
 v3d_bo_map_unsynchronized_write(struct v3d_bo *bo)
 {
-        void *map = v3d_bo_map_unsynchronized(bo);
-
-        v3d_bo_mark_cpu_dirty(bo);
-        return map;
+        return v3d_bo_map_access(bo, false, true);
 }
 
 void

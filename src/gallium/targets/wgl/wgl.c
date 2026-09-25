@@ -76,6 +76,8 @@
 #include "v3d/d3dkmt/v3d_d3dkmt_public.h"
 #endif
 
+static struct stw_winsys stw_winsys;
+
 #ifdef GALLIUM_LLVMPIPE
 static bool use_llvmpipe = false;
 #endif
@@ -93,6 +95,8 @@ static bool use_v3d = false;
 #endif
 
 static const char *created_driver_name = NULL;
+
+static bool wgl_can_compose(void);
 
 #if defined(GALLIUM_VC4) || defined(GALLIUM_V3D)
 struct stw_shared_surface {
@@ -161,11 +165,11 @@ wgl_screen_create(HDC hDC)
 
    const char *const drivers[] = {
       debug_get_option("GALLIUM_DRIVER", ""),
-#ifdef GALLIUM_VC4
-      sw_only ? "" : "vc4",
-#endif
 #ifdef GALLIUM_V3D
       sw_only ? "" : "v3d",
+#endif
+#ifdef GALLIUM_VC4
+      sw_only ? "" : "vc4",
 #endif
 #ifdef GALLIUM_D3D12
       sw_only ? "" : "d3d12",
@@ -189,12 +193,18 @@ wgl_screen_create(HDC hDC)
       if (screen) {
          created_driver_name = drivers[i];
 #ifdef GALLIUM_VC4
-         if (use_vc4)
+         if (use_vc4) {
             winsys->destroy(winsys);
+            stw_winsys.presentation_trace = vc4_d3dkmt_trace_control;
+            stw_winsys.presentation_trace_bank = &vc4_present_trace;
+         }
 #endif
 #ifdef GALLIUM_V3D
-         if (use_v3d)
+         if (use_v3d) {
             winsys->destroy(winsys);
+            stw_winsys.presentation_trace = v3d_d3dkmt_trace_control;
+            stw_winsys.presentation_trace_bank = &v3d_present_trace;
+         }
 #endif
          return screen;
       }
@@ -318,7 +328,9 @@ wgl_shared_surface_open(struct pipe_screen *screen,
    struct winsys_handle whandle = { 0 };
    unsigned width, height;
 
-   if (!screen || !screen->resource_from_handle || !shared_handle ||
+   /* This import path uses D3DKMT handles. The software GDI winsys
+    * cannot import them; let stw_present_buffers use its normal blit path. */
+   if (!wgl_can_compose() || !screen || !screen->resource_from_handle || !shared_handle ||
        !source || !rect || rect->right <= rect->left ||
        rect->bottom <= rect->top)
       return NULL;
@@ -403,10 +415,8 @@ wgl_compose(struct pipe_screen *screen,
    u_box_2d(0, 0, width, height, &box);
 #ifdef GALLIUM_VC4
    if (use_vc4) {
-      struct pipe_blit_info blit = {0};
+      struct pipe_blit_info blit = { 0 };
 
-      /* Copy through the VC4 tile/render path. The completion fence below
-       * still protects publication and reuse of the shared window surface. */
       blit.src.resource = source;
       blit.src.format = source->format;
       blit.src.box = box;
@@ -419,8 +429,25 @@ wgl_compose(struct pipe_screen *screen,
          return false;
    } else
 #endif
+#ifdef GALLIUM_V3D
+   if (use_v3d) {
+      struct pipe_blit_info blit = { 0 };
+
+      blit.src.resource = source;
+      blit.src.format = source->format;
+      blit.src.box = box;
+      blit.dst.resource = dest->resource;
+      blit.dst.format = dest->resource->format;
+      blit.dst.box = box;
+      blit.mask = PIPE_MASK_RGBA;
+      blit.filter = PIPE_TEX_FILTER_NEAREST;
+      context->blit(context, &blit);
+   } else
+#endif
+   {
       context->resource_copy_region(context, dest->resource, 0, 0, 0, 0,
                                     source, 0, &box);
+   }
    context->flush(context, &fence, PIPE_FLUSH_END_OF_FRAME);
    if (!fence)
       return false;
@@ -479,7 +506,7 @@ wgl_can_compose(void)
    return false;
 }
 
-static const struct stw_winsys stw_winsys = {
+static struct stw_winsys stw_winsys = {
    &wgl_screen_create,
    &wgl_present,
 #if WINVER >= 0xA00
@@ -498,13 +525,8 @@ static const struct stw_winsys stw_winsys = {
 #endif
    &wgl_create_framebuffer,
    &wgl_get_name,
-#ifdef GALLIUM_VC4
-   &vc4_d3dkmt_trace_control,
-   &vc4_present_trace,
-#else
    NULL,
    NULL,
-#endif
    &wgl_present_region,
    &wgl_can_compose,
 };

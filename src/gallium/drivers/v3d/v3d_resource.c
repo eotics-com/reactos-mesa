@@ -38,6 +38,10 @@
 #include "v3d_screen.h"
 #include "v3d_context.h"
 #include "v3d_resource.h"
+#ifdef __REACTOS__
+#include "broadcom/common/v3d_d3dkmt.h"
+#include "v3d/d3dkmt/v3d_d3dkmt_public.h"
+#endif
 /* The packets used here the same across V3D versions. */
 #include "broadcom/cle/v3d_packet_v42_pack.h"
 
@@ -105,12 +109,11 @@ v3d_debug_resource_layout(struct v3d_resource *rsc, const char *caller)
         }
 }
 
-static bool
-v3d_resource_bo_alloc(struct v3d_resource *rsc)
+static struct v3d_bo *
+v3d_resource_bo_create(struct v3d_resource *rsc)
 {
         struct pipe_resource *prsc = &rsc->base;
         struct pipe_screen *pscreen = prsc->screen;
-        struct v3d_bo *bo;
 
         /* Buffers may be read using ldunifa, which prefetches the next 4
          * bytes after a read. If the buffer's size is exactly a multiple of a
@@ -122,18 +125,54 @@ v3d_resource_bo_alloc(struct v3d_resource *rsc)
          */
         uint32_t padding =
                 rsc->base.target == PIPE_BUFFER ? 4 : V3D_TFU_READAHEAD_SIZE;
-        bo = v3d_bo_alloc(v3d_screen(pscreen), rsc->size + padding,
-                          "resource");
-        if (bo) {
-                v3d_bo_unreference(&rsc->bo);
-                rsc->bo = bo;
-                rsc->serial_id++;
-                v3d_debug_resource_layout(rsc, "alloc");
-                return true;
-        } else {
+#ifdef _WIN32
+        if (prsc->target == PIPE_BUFFER)
+                return v3d_bo_alloc_cpu_cached(v3d_screen(pscreen),
+                                               rsc->size + padding,
+                                               "resource");
+#endif
+        return v3d_bo_alloc(v3d_screen(pscreen), rsc->size + padding,
+                            "resource");
+}
+
+static bool
+v3d_resource_bo_alloc(struct v3d_resource *rsc)
+{
+        struct v3d_bo *bo = v3d_resource_bo_create(rsc);
+
+        if (!bo)
                 return false;
+
+        v3d_bo_unreference(&rsc->bo);
+        rsc->bo = bo;
+        rsc->serial_id++;
+        v3d_debug_resource_layout(rsc, "alloc");
+        return true;
+}
+
+#ifdef __REACTOS__
+static void
+v3d_resource_transfer_flush_region(struct pipe_context *pctx,
+                                   struct pipe_transfer *ptrans,
+                                   const struct pipe_box *box)
+{
+        struct v3d_resource *rsc = v3d_resource(ptrans->resource);
+
+        if (!(ptrans->usage & PIPE_MAP_WRITE) || !box->width ||
+            !box->height || !box->depth)
+                return;
+
+        /* A VBO can be mapped for its next draw before the previous draw is
+         * submitted. That submission consumes the dirty flag set at map
+         * time, before the caller has written the next range. Re-publish at
+         * flush/unmap so the next submit cleans the new CPU-cached data. */
+        if (v3d_d3dkmt_bo_mark_cpu_dirty(v3d_context(pctx)->fd,
+                                         rsc->bo->handle) != 0) {
+                mesa_loge("Failed to publish mapped BO writes");
+                abort();
         }
 }
+#endif
 
 static void
 v3d_resource_transfer_unmap(struct pipe_context *pctx,
@@ -166,6 +205,9 @@ v3d_resource_transfer_unmap(struct pipe_context *pctx,
                 free(trans->map);
         }
 
+#ifdef __REACTOS__
+        v3d_resource_transfer_flush_region(pctx, ptrans, &ptrans->box);
+#endif
         pipe_resource_reference(&ptrans->resource, NULL);
         slab_free(&v3d->transfer_pool, ptrans);
 }
@@ -200,6 +242,222 @@ rebind_sampler_views(struct v3d_context *v3d,
 }
 
 static void
+v3d_rebind_resource(struct v3d_context *v3d, struct v3d_resource *rsc)
+{
+        struct pipe_resource *prsc = &rsc->base;
+
+        if (prsc->bind & PIPE_BIND_VERTEX_BUFFER)
+                v3d->dirty |= V3D_DIRTY_VTXBUF;
+        if (prsc->bind & PIPE_BIND_CONSTANT_BUFFER)
+                v3d->dirty |= V3D_DIRTY_CONSTBUF;
+        if (prsc->bind & PIPE_BIND_SAMPLER_VIEW)
+                rebind_sampler_views(v3d, rsc);
+}
+
+#ifdef _WIN32
+struct v3d_resource_identity {
+        struct v3d_bo *bo;
+        struct renderonly_scanout *scanout;
+        bool compute_written;
+        bool graphics_written;
+        uint64_t writes;
+#ifdef __REACTOS__
+        bool external_updates_tracked;
+#endif
+        uint32_t initialized_buffers;
+        bool invalidated;
+};
+
+static bool
+v3d_resource_identity_compatible(const struct v3d_resource *left,
+                                 const struct v3d_resource *right)
+{
+        const struct pipe_resource *a = &left->base;
+        const struct pipe_resource *b = &right->base;
+
+        return a != b && a->screen == b->screen &&
+               a->target == b->target && a->format == b->format &&
+               a->width0 == b->width0 && a->height0 == b->height0 &&
+               a->depth0 == b->depth0 && a->array_size == b->array_size &&
+               a->last_level == b->last_level &&
+               a->nr_samples == b->nr_samples &&
+               a->nr_storage_samples == b->nr_storage_samples &&
+               a->bind == b->bind && a->usage == b->usage &&
+               a->flags == b->flags && left->bo && right->bo &&
+               left->bo != right->bo &&
+               left->bo->screen == right->bo->screen &&
+               left->bo->size == right->bo->size &&
+               left->size == right->size && left->cpp == right->cpp &&
+               left->tiled == right->tiled &&
+               left->cube_map_stride == right->cube_map_stride &&
+               left->sand_col128_stride == right->sand_col128_stride &&
+               !left->separate_stencil && !right->separate_stencil &&
+               left->internal_format == right->internal_format &&
+               memcmp(left->slices, right->slices,
+                      sizeof(left->slices)) == 0;
+}
+
+static struct v3d_resource_identity
+v3d_resource_get_identity(const struct v3d_resource *rsc)
+{
+        struct v3d_resource_identity identity = {
+                .bo = rsc->bo,
+                .scanout = rsc->scanout,
+                .compute_written = rsc->compute_written,
+                .graphics_written = rsc->graphics_written,
+                .writes = rsc->writes,
+#ifdef __REACTOS__
+                .external_updates_tracked = rsc->external_updates_tracked,
+#endif
+                .initialized_buffers = rsc->initialized_buffers,
+                .invalidated = rsc->invalidated,
+        };
+
+        return identity;
+}
+
+static void
+v3d_resource_set_identity(struct v3d_resource *rsc,
+                          const struct v3d_resource_identity *identity)
+{
+        rsc->bo = identity->bo;
+        rsc->scanout = identity->scanout;
+        rsc->compute_written = identity->compute_written;
+        rsc->graphics_written = identity->graphics_written;
+        rsc->writes = identity->writes;
+#ifdef __REACTOS__
+        rsc->external_updates_tracked = identity->external_updates_tracked;
+#endif
+        rsc->initialized_buffers = identity->initialized_buffers;
+        rsc->invalidated = identity->invalidated;
+        rsc->serial_id++;
+}
+
+bool
+v3d_resource_rotate_identities(struct pipe_context *pctx,
+                               struct pipe_resource *const *resources,
+                               void *const *runtime_resources,
+                               unsigned count)
+{
+        struct v3d_context *v3d;
+        struct v3d_resource *first;
+        struct v3d_resource_identity first_identity;
+
+        if (!pctx || !resources || !runtime_resources ||
+            count < 2 || count > 16)
+                return false;
+        v3d = v3d_context(pctx);
+        first = v3d_resource(resources[0]);
+        if (!first || resources[0]->screen != pctx->screen ||
+            !(resources[0]->bind & PIPE_BIND_DISPLAY_TARGET))
+                return false;
+
+        for (unsigned i = 1; i < count; i++) {
+                struct v3d_resource *rsc;
+
+                if (!resources[i] || !runtime_resources[i] ||
+                    resources[i]->screen != pctx->screen)
+                        return false;
+                rsc = v3d_resource(resources[i]);
+                if (!v3d_resource_identity_compatible(first, rsc))
+                        return false;
+                for (unsigned previous = 0; previous < i; previous++) {
+                        struct v3d_resource *previous_rsc =
+                                v3d_resource(resources[previous]);
+
+                        if (resources[previous] == resources[i] ||
+                            runtime_resources[previous] == runtime_resources[i] ||
+                            previous_rsc->bo == rsc->bo)
+                                return false;
+                }
+        }
+
+        /* Submitted jobs retain references to their BOs, so identity can move
+         * after the current job is submitted.  Rebind each allocation's
+         * runtime owner before changing the resource objects so teardown uses
+         * the post-rotation runtime identity. */
+        v3d_flush(pctx);
+        if (!v3d_d3dkmt_rebind_runtime_resources(
+                    pctx->screen, resources, runtime_resources, count))
+                return false;
+        first_identity = v3d_resource_get_identity(first);
+        for (unsigned i = 0; i + 1 < count; i++) {
+                struct v3d_resource *destination = v3d_resource(resources[i]);
+                struct v3d_resource *source = v3d_resource(resources[i + 1]);
+                struct v3d_resource_identity identity =
+                        v3d_resource_get_identity(source);
+
+                v3d_resource_set_identity(destination, &identity);
+        }
+        v3d_resource_set_identity(v3d_resource(resources[count - 1]),
+                                  &first_identity);
+
+        for (unsigned i = 0; i < count; i++)
+                v3d_rebind_resource(v3d, v3d_resource(resources[i]));
+        v3d->dirty |= V3D_DIRTY_FRAMEBUFFER;
+        return true;
+}
+#endif
+
+#ifdef __REACTOS__
+static bool
+v3d_preserve_and_rename_busy_buffer(struct v3d_context *v3d,
+                                    struct v3d_resource *rsc,
+                                    unsigned usage)
+{
+        struct pipe_resource *prsc = &rsc->base;
+        const unsigned excluded_usage =
+                PIPE_MAP_READ | PIPE_MAP_DONTBLOCK |
+                PIPE_MAP_UNSYNCHRONIZED | PIPE_MAP_DISCARD_RANGE |
+                PIPE_MAP_DISCARD_WHOLE_RESOURCE | PIPE_MAP_PERSISTENT |
+                PIPE_MAP_COHERENT | PIPE_MAP_THREAD_SAFE;
+        struct v3d_bo *old_bo = rsc->bo;
+        bool pending_reader = false;
+
+        if (prsc->target != PIPE_BUFFER || !(usage & PIPE_MAP_WRITE) ||
+            (usage & excluded_usage) ||
+            (prsc->flags & (PIPE_RESOURCE_FLAG_MAP_PERSISTENT |
+                            PIPE_RESOURCE_FLAG_MAP_COHERENT)) ||
+            !old_bo->private ||
+            _mesa_hash_table_search(v3d->write_jobs, prsc))
+                return false;
+
+        hash_table_foreach(v3d->jobs, entry) {
+                struct v3d_job *job = entry->data;
+
+                if (!_mesa_set_search(job->bos, old_bo))
+                        continue;
+                if (job->write_bos && _mesa_set_search(job->write_bos, old_bo))
+                        return false;
+                pending_reader = true;
+        }
+
+        if (!pending_reader && v3d_bo_wait(old_bo, 0, NULL))
+                return false;
+
+        struct v3d_bo *new_bo = v3d_resource_bo_create(rsc);
+        if (!new_bo)
+                return false;
+
+        int copied = v3d_d3dkmt_bo_copy_cpu_contents(v3d->fd,
+                                                      old_bo->handle,
+                                                      new_bo->handle,
+                                                      rsc->size);
+        if (copied != 1) {
+                v3d_bo_unreference(&new_bo);
+                return false;
+        }
+
+        rsc->bo = new_bo;
+        rsc->serial_id++;
+        v3d_debug_resource_layout(rsc, "rename");
+        v3d_rebind_resource(v3d, rsc);
+        v3d_bo_unreference(&old_bo);
+        return true;
+}
+#endif
+
+static void
 v3d_map_usage_prep(struct pipe_context *pctx,
                    struct pipe_resource *prsc,
                    unsigned usage)
@@ -220,23 +478,7 @@ v3d_map_usage_prep(struct pipe_context *pctx,
                                                 V3D_FLUSH_ALWAYS,
                                                 false);
                 if (v3d_resource_bo_alloc(rsc)) {
-                        /* If it might be bound as one of our vertex buffers
-                         * or UBOs, make sure we re-emit vertex buffer state
-                         * or uniforms.
-                         */
-                        if (prsc->bind & PIPE_BIND_VERTEX_BUFFER)
-                                v3d->dirty |= V3D_DIRTY_VTXBUF;
-                        if (prsc->bind & PIPE_BIND_CONSTANT_BUFFER)
-                                v3d->dirty |= V3D_DIRTY_CONSTBUF;
-                        /* Since we are changing the texture BO we need to
-                         * update any bound samplers to point to the new
-                         * BO. Notice we can have samplers that are not
-                         * currently bound to the state that won't be
-                         * updated. These will be fixed when they are bound in
-                         * v3d_set_sampler_views.
-                         */
-                        if (prsc->bind & PIPE_BIND_SAMPLER_VIEW)
-                                rebind_sampler_views(v3d, rsc);
+                        v3d_rebind_resource(v3d, rsc);
                 } else {
                         /* If we failed to reallocate, flush users so that we
                          * don't violate any syncing requirements.
@@ -299,6 +541,11 @@ v3d_resource_transfer_map(struct pipe_context *pctx,
             rsc->bo->private) {
                 usage |= PIPE_MAP_DISCARD_WHOLE_RESOURCE;
         }
+
+#ifdef __REACTOS__
+        if (v3d_preserve_and_rename_busy_buffer(v3d, rsc, usage))
+                usage |= PIPE_MAP_UNSYNCHRONIZED;
+#endif
 
         v3d_map_usage_prep(pctx, prsc, usage);
 
@@ -454,8 +701,9 @@ v3d_resource_modifier(struct v3d_resource *rsc)
                 /* A shared tiled buffer should always be allocated as UIF,
                  * not UBLINEAR or LT.
                  */
-                assert(rsc->slices[0].tiling == V3D_TILING_UIF_XOR ||
-                       rsc->slices[0].tiling == V3D_TILING_UIF_NO_XOR);
+                if (rsc->slices[0].tiling != V3D_TILING_UIF_XOR &&
+                    rsc->slices[0].tiling != V3D_TILING_UIF_NO_XOR)
+                        return DRM_FORMAT_MOD_INVALID;
                 return DRM_FORMAT_MOD_BROADCOM_UIF;
         } else {
                 return DRM_FORMAT_MOD_LINEAR;
@@ -475,6 +723,8 @@ v3d_resource_get_handle(struct pipe_screen *pscreen,
         whandle->stride = rsc->slices[0].stride;
         whandle->offset = 0;
         whandle->modifier = v3d_resource_modifier(rsc);
+        if (whandle->modifier == DRM_FORMAT_MOD_INVALID)
+                return false;
 
         /* If we're passing some reference to our BO out to some other part of
          * the system, then we can't do any optimizations about only us being
@@ -532,7 +782,7 @@ v3d_resource_get_param(struct pipe_screen *pscreen,
                 return true;
         case PIPE_RESOURCE_PARAM_MODIFIER:
                 *value = v3d_resource_modifier(rsc);
-                return true;
+                return *value != DRM_FORMAT_MOD_INVALID;
         case PIPE_RESOURCE_PARAM_NPLANES:
                 *value = util_resource_num(prsc);
                 return true;
@@ -957,11 +1207,13 @@ v3d_resource_from_handle(struct pipe_screen *pscreen,
 {
         struct v3d_screen *screen = v3d_screen(pscreen);
         struct v3d_resource *rsc = v3d_resource_setup(pscreen, tmpl);
-        struct pipe_resource *prsc = &rsc->base;
-        struct v3d_resource_slice *slice = &rsc->slices[0];
+        struct pipe_resource *prsc;
+        struct v3d_resource_slice *slice;
 
         if (!rsc)
                 return NULL;
+        prsc = &rsc->base;
+        slice = &rsc->slices[0];
 
         switch (whandle->modifier) {
         case DRM_FORMAT_MOD_LINEAR:
@@ -996,6 +1248,15 @@ v3d_resource_from_handle(struct pipe_screen *pscreen,
                 rsc->bo = v3d_bo_open_name(
                         screen, V3D_WINSYS_HANDLE_TO_U32(whandle->handle));
                 break;
+        case WINSYS_HANDLE_TYPE_KMS:
+                if (!whandle->size || whandle->size > UINT32_MAX) {
+                        mesa_loge("Attempt to import invalid KMS allocation size");
+                        goto fail;
+                }
+                rsc->bo = v3d_bo_open_kms(
+                        screen, V3D_WINSYS_HANDLE_TO_U32(whandle->handle),
+                        (uint32_t)whandle->size);
+                break;
         case WINSYS_HANDLE_TYPE_FD:
                 rsc->bo = v3d_bo_open_dmabuf(
                         screen, V3D_WINSYS_HANDLE_TO_FD(whandle->handle));
@@ -1013,6 +1274,12 @@ v3d_resource_from_handle(struct pipe_screen *pscreen,
 
         v3d_setup_slices(screen, rsc, whandle->stride, true);
         v3d_debug_resource_layout(rsc, "import");
+
+        if (rsc->size > rsc->bo->size) {
+                mesa_loge("Attempt to import undersized allocation (%d > %d)",
+                          rsc->size, rsc->bo->size);
+                goto fail;
+        }
 
         if (whandle->offset != 0) {
                 if (rsc->tiled) {
@@ -1046,7 +1313,8 @@ v3d_resource_from_handle(struct pipe_screen *pscreen,
         }
 #endif
 
-        if (rsc->tiled && whandle->stride != slice->stride) {
+        if (rsc->tiled && whandle->stride &&
+            whandle->stride != slice->stride) {
                 static bool warned = false;
                 if (!warned) {
                         warned = true;
@@ -1090,6 +1358,13 @@ v3d_update_shadow_texture(struct pipe_context *pctx,
 #endif
             ))
                 return;
+
+#ifdef __REACTOS__
+        /* Untracked shared textures may have new writes in the CPU cache. */
+        if (!orig->bo->private && !orig->external_updates_tracked &&
+            v3d_d3dkmt_bo_mark_external_dirty(v3d->screen->fd, orig->bo->handle) != 0)
+                mesa_loge("Failed to synchronize external V3D texture writes");
+#endif
 
         perf_debug("Updating %dx%d@%d shadow for linear texture\n",
                    orig->base.width0, orig->base.height0,
@@ -1154,7 +1429,15 @@ v3d_flush_resource(struct pipe_context *pctx, struct pipe_resource *prsc)
                 ptmpl.bind |= PIPE_BIND_SHARED;
                 struct v3d_resource *new_rsc =
                         v3d_resource(pctx->screen->resource_create(pctx->screen, &ptmpl));
-                assert(new_rsc);
+                if (!new_rsc) {
+                        /* Allocation can fail after a device reset as well as
+                         * under memory pressure. Leave the original intact;
+                         * get_handle rejects its unexportable tiling until a
+                         * later conversion succeeds. */
+                        util_debug_message(&pctx->debug, OUT_OF_MEMORY,
+                                           "Unable to allocate shared V3D resource");
+                        return;
+                }
 
                 struct pipe_blit_info blit = { 0 };
                 u_box_3d(0, 0, 0,
@@ -1216,7 +1499,11 @@ static const struct u_transfer_vtbl transfer_vtbl = {
         .resource_destroy         = v3d_resource_destroy,
         .transfer_map             = v3d_resource_transfer_map,
         .transfer_unmap           = v3d_resource_transfer_unmap,
+#ifdef __REACTOS__
+        .transfer_flush_region    = v3d_resource_transfer_flush_region,
+#else
         .transfer_flush_region    = u_default_transfer_flush_region,
+#endif
         .get_internal_format      = v3d_resource_get_internal_format,
         .set_stencil              = v3d_resource_set_stencil,
         .get_stencil              = v3d_resource_get_stencil,
@@ -1227,8 +1514,14 @@ static void
 v3d_resource_changed(struct pipe_screen *pscreen, struct pipe_resource *prsc)
 {
         struct v3d_resource *rsc = v3d_resource(prsc);
-        (void)pscreen;
-        /* Invalidate the tiled copy without changing shared BO ownership. */
+        /* GDI can write an imported redirection BO through a different CPU
+         * mapping. Its next GPU submission must clean those writes as well
+         * as invalidate this context's tiled sampling copy. A GPU-only
+         * publication has no dirty CPU lines, so the clean is harmless. */
+        if (rsc->bo &&
+            v3d_d3dkmt_bo_mark_external_dirty(v3d_screen(pscreen)->fd,
+                                              rsc->bo->handle) != 0)
+                mesa_loge("Failed to mark externally updated V3D BO dirty");
         rsc->external_updates_tracked = true;
         rsc->writes++;
 }
@@ -1262,7 +1555,11 @@ v3d_resource_context_init(struct pipe_context *pctx)
         pctx->texture_unmap = u_transfer_helper_transfer_unmap;
         pctx->buffer_subdata = u_default_buffer_subdata;
         pctx->texture_subdata = v3d_texture_subdata;
+#ifdef __REACTOS__
+        pctx->resource_copy_region = v3d_resource_copy_region;
+#else
         pctx->resource_copy_region = util_resource_copy_region;
+#endif
         pctx->blit = v3d_blit;
         pctx->generate_mipmap = v3d_generate_mipmap;
         pctx->flush_resource = v3d_flush_resource;

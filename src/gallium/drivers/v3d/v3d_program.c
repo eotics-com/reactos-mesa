@@ -452,6 +452,37 @@ v3d_shader_state_create(struct pipe_context *pctx,
         return so;
 }
 
+struct v3d_uncompiled_shader *
+v3d_get_cull_distance_gs(struct v3d_context *v3d, enum mesa_prim mode)
+{
+        struct v3d_uncompiled_shader *vs = v3d->prog.bind_vs;
+
+        assert(vs);
+        assert(vs->base.ir.nir->info.stage == MESA_SHADER_VERTEX);
+        assert(vs->base.ir.nir->info.cull_distance_array_size > 0);
+        assert(mode < MESA_PRIM_COUNT);
+
+        if (!vs->cull_distance_gs[mode]) {
+                const nir_shader_compiler_options *options =
+                        v3d->base.screen->nir_options[MESA_SHADER_GEOMETRY];
+                nir_shader *gs = nir_create_passthrough_gs(
+                        options, vs->base.ir.nir, mode, mode,
+                        false /* emulate edge flags */,
+                        true /* emulate cull distance */,
+                        false /* force line strip out */,
+                        true /* preserve primitive ID semantics */);
+                struct pipe_shader_state state = {
+                        .type = PIPE_SHADER_IR_NIR,
+                        .ir.nir = gs,
+                };
+
+                vs->cull_distance_gs[mode] =
+                        v3d_shader_state_create(&v3d->base, &state);
+        }
+
+        return vs->cull_distance_gs[mode];
+}
+
 /* Key ued with the RAM cache */
 struct v3d_cache_key {
         struct v3d_key *key;
@@ -556,9 +587,22 @@ v3d_free_compiled_shader(struct v3d_compiled_shader *shader)
 
 static void
 v3d_setup_shared_key(struct v3d_context *v3d, struct v3d_key *key,
-                     struct v3d_texture_stateobj *texstate)
+                     struct v3d_texture_stateobj *texstate,
+                     const nir_shader *shader)
 {
         const struct v3d_device_info *devinfo = &v3d->screen->devinfo;
+
+        /* Null views have zero size. Use the existing null-descriptor
+         * lowering so queries preserve zero instead of minifying it to one.
+         * Keep ordinary shaders on the existing fast path.
+         */
+        for (unsigned i = 0; i < ARRAY_SIZE(texstate->textures); ++i) {
+                if (BITSET_TEST(shader->info.textures_used, i) &&
+                    !texstate->textures[i]) {
+                        key->null_descriptor = true;
+                        break;
+                }
+        }
 
         for (int i = 0; i < texstate->num_textures; i++) {
                 struct pipe_sampler_view *sampler = texstate->textures[i];
@@ -599,7 +643,8 @@ v3d_update_compiled_fs(struct v3d_context *v3d, uint8_t prim_mode)
         }
 
         memset(key, 0, sizeof(*key));
-        v3d_setup_shared_key(v3d, &key->base, &v3d->tex[MESA_SHADER_FRAGMENT]);
+        v3d_setup_shared_key(v3d, &key->base, &v3d->tex[MESA_SHADER_FRAGMENT],
+                             v3d->prog.bind_fs->base.ir.nir);
         key->ucp_enables = v3d->rasterizer->base.clip_plane_enable;
         key->is_points = (prim_mode == MESA_PRIM_POINTS);
         key->is_lines = (prim_mode >= MESA_PRIM_LINES &&
@@ -772,7 +817,8 @@ v3d_update_compiled_gs(struct v3d_context *v3d, uint8_t prim_mode)
         }
 
         memset(key, 0, sizeof(*key));
-        v3d_setup_shared_key(v3d, &key->base, &v3d->tex[MESA_SHADER_GEOMETRY]);
+        v3d_setup_shared_key(v3d, &key->base, &v3d->tex[MESA_SHADER_GEOMETRY],
+                             v3d->prog.bind_gs->base.ir.nir);
         key->base.is_last_geometry_stage = true;
         key->num_used_outputs = v3d->prog.fs->prog_data.fs->num_inputs;
         STATIC_ASSERT(sizeof(key->used_outputs) ==
@@ -844,7 +890,8 @@ v3d_update_compiled_vs(struct v3d_context *v3d, uint8_t prim_mode)
         }
 
         memset(key, 0, sizeof(*key));
-        v3d_setup_shared_key(v3d, &key->base, &v3d->tex[MESA_SHADER_VERTEX]);
+        v3d_setup_shared_key(v3d, &key->base, &v3d->tex[MESA_SHADER_VERTEX],
+                             v3d->prog.bind_vs->base.ir.nir);
         key->base.is_last_geometry_stage = !v3d->prog.bind_gs;
 
         if (!v3d->prog.bind_gs) {
@@ -957,7 +1004,8 @@ v3d_update_compiled_cs(struct v3d_context *v3d)
         }
 
         memset(key, 0, sizeof(*key));
-        v3d_setup_shared_key(v3d, key, &v3d->tex[MESA_SHADER_COMPUTE]);
+        v3d_setup_shared_key(v3d, key, &v3d->tex[MESA_SHADER_COMPUTE],
+                             v3d->prog.bind_compute->base.ir.nir);
 
         struct v3d_compiled_shader *cs =
                 v3d_get_compiled_shader(v3d, key, sizeof(*key),
@@ -1049,6 +1097,14 @@ v3d_shader_state_delete(struct pipe_context *pctx, void *hwcso)
         struct v3d_uncompiled_shader *so = hwcso;
         nir_shader *s = so->base.ir.nir;
 
+        if (s->info.stage == MESA_SHADER_VERTEX) {
+                for (unsigned i = 0; i < MESA_PRIM_COUNT; ++i) {
+                        if (so->cull_distance_gs[i])
+                                v3d_shader_state_delete(
+                                        pctx, so->cull_distance_gs[i]);
+                }
+        }
+
         hash_table_foreach(v3d->prog.cache[s->info.stage], entry) {
                 const struct v3d_cache_key *cache_key = entry->key;
                 struct v3d_compiled_shader *shader = entry->data;
@@ -1062,6 +1118,10 @@ v3d_shader_state_delete(struct pipe_context *pctx, void *hwcso)
                         v3d->prog.vs = NULL;
                 if (v3d->prog.cs == shader)
                         v3d->prog.cs = NULL;
+                if (v3d->prog.gs == shader)
+                        v3d->prog.gs = NULL;
+                if (v3d->prog.gs_bin == shader)
+                        v3d->prog.gs_bin = NULL;
                 if (v3d->prog.compute == shader)
                         v3d->prog.compute = NULL;
 

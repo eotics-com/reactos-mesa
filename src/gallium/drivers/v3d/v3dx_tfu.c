@@ -100,7 +100,9 @@ v3dX(tfu)(struct pipe_context *pctx,
                         dst->bo->handle,
                         src != dst ? src->bo->handle : 0
                 },
+#ifndef _WIN32
                 .in_sync = v3d->out_sync,
+#endif
                 .out_sync = v3d->out_sync,
         };
         uint32_t src_offset = (src->bo->offset +
@@ -201,6 +203,9 @@ v3dX(tfu)(struct pipe_context *pctx,
         tfu.v71.ioc |= (last_level - base_level) << V3D71_TFU_IOC_NUMMM_SHIFT;
 #endif /* V3D_VERSION >= 71*/
 
+#ifdef _WIN32
+        tfu.bo_handles[0] |= V3D_D3DKMT_SUBMIT_HANDLE_WRITE;
+#endif
         int ret = v3d_ioctl(screen->fd, DRM_IOCTL_V3D_SUBMIT_TFU, &tfu);
         if (ret != 0) {
                 mesa_loge("Failed to submit TFU job: %d", ret);
@@ -215,4 +220,3 @@ v3dX(tfu)(struct pipe_context *pctx,
 
         return true;
 }
-

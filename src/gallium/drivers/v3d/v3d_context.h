@@ -66,6 +66,7 @@ void v3d_job_add_bo(struct v3d_job *job, struct v3d_bo *bo);
 #define V3D_DIRTY_GEOMTEX             (1ull <<  5)
 #define V3D_DIRTY_FRAGTEX             (1ull <<  6)
 #define V3D_DIRTY_RASTERIZER_SCISSOR  (1ull <<  7)
+#define V3D_DIRTY_FIRST_VERTEX        (1ull <<  8)
 
 #define V3D_DIRTY_SHADER_IMAGE        (1ull <<  9)
 #define V3D_DIRTY_BLEND_COLOR         (1ull << 10)
@@ -242,6 +243,12 @@ struct v3d_uncompiled_shader {
         uint16_t tf_specs_psiz[16];
         uint32_t num_tf_specs;
 
+        /* V3D has no fixed-function primitive cull-distance unit.  Vertex
+         * shader cull distances are enforced by a cached GPU passthrough GS
+         * specialized for the draw topology.
+         */
+        struct v3d_uncompiled_shader *cull_distance_gs[MESA_PRIM_COUNT];
+
         /* For caching */
         unsigned char blake3[BLAKE3_KEY_LEN];
 };
@@ -388,6 +395,9 @@ struct v3d_job {
 
         struct set *write_prscs;
         struct set *tf_write_prscs;
+#ifdef _WIN32
+        struct set *write_bos;
+#endif
 
         /* Size of the submit.bo_handles array. */
         uint32_t bo_handles_size;
@@ -614,6 +624,7 @@ struct v3d_context {
         struct v3d_compiler_state *compiler_state;
 
         uint8_t prim_mode;
+        uint32_t first_vertex;
 
         /** Maximum index buffer valid for the current shader_rec. */
         uint32_t max_index;
@@ -838,6 +849,10 @@ struct v3d_job *v3d_get_job(struct v3d_context *v3d,
                             struct pipe_surface *bbuf);
 struct v3d_job *v3d_get_job_for_fbo(struct v3d_context *v3d);
 void v3d_job_add_bo(struct v3d_job *job, struct v3d_bo *bo);
+#ifdef _WIN32
+void v3d_job_add_write_bo(struct v3d_job *job, struct v3d_bo *bo);
+void v3d_job_prepare_submit(struct v3d_job *job);
+#endif
 void v3d_job_add_write_resource(struct v3d_job *job, struct pipe_resource *prsc);
 void v3d_job_add_tf_write_resource(struct v3d_job *job, struct pipe_resource *prsc);
 void v3d_job_submit(struct v3d_context *v3d, struct v3d_job *job);
@@ -852,6 +867,8 @@ void v3d_flush_jobs_reading_resource(struct v3d_context *v3d,
                                      bool is_compute_pipeline);
 void v3d_update_compiled_shaders(struct v3d_context *v3d, uint8_t prim_mode);
 void v3d_update_compiled_cs(struct v3d_context *v3d);
+struct v3d_uncompiled_shader *
+v3d_get_cull_distance_gs(struct v3d_context *v3d, enum mesa_prim mode);
 
 bool v3d_rt_format_is_emulated(enum pipe_format f);
 bool v3d_rt_format_supported(const struct v3d_device_info *devinfo,
@@ -875,6 +892,13 @@ void v3d_format_get_internal_type_and_bpp(const struct v3d_device_info *devinfo,
 
 void v3d_init_query_functions(struct v3d_context *v3d);
 void v3d_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info);
+#ifdef __REACTOS__
+void v3d_resource_copy_region(struct pipe_context *pctx,
+                              struct pipe_resource *dst, unsigned dst_level,
+                              unsigned dst_x, unsigned dst_y, unsigned dst_z,
+                              struct pipe_resource *src, unsigned src_level,
+                              const struct pipe_box *src_box);
+#endif
 void v3d_blitter_save(struct v3d_context *v3d, enum v3d_blitter_op op);
 bool v3d_generate_mipmap(struct pipe_context *pctx,
                          struct pipe_resource *prsc,

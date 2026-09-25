@@ -240,10 +240,24 @@ FormatTranslate(DXGI_FORMAT Format, BOOL depth)
    case DXGI_FORMAT_BC5_SNORM:
       return PIPE_FORMAT_RGTC2_SNORM;
 
+   case DXGI_FORMAT_BC6H_TYPELESS:
+   case DXGI_FORMAT_BC6H_UF16:
+      return PIPE_FORMAT_BPTC_RGB_UFLOAT;
+   case DXGI_FORMAT_BC6H_SF16:
+      return PIPE_FORMAT_BPTC_RGB_FLOAT;
+
+   case DXGI_FORMAT_BC7_TYPELESS:
+   case DXGI_FORMAT_BC7_UNORM:
+      return PIPE_FORMAT_BPTC_RGBA_UNORM;
+   case DXGI_FORMAT_BC7_UNORM_SRGB:
+      return PIPE_FORMAT_BPTC_SRGBA;
+
    case DXGI_FORMAT_B5G6R5_UNORM:
       return PIPE_FORMAT_B5G6R5_UNORM;
    case DXGI_FORMAT_B5G5R5A1_UNORM:
       return PIPE_FORMAT_B5G5R5A1_UNORM;
+   case DXGI_FORMAT_B4G4R4A4_UNORM:
+      return PIPE_FORMAT_B4G4R4A4_UNORM;
    case DXGI_FORMAT_B8G8R8A8_UNORM:
       return PIPE_FORMAT_B8G8R8A8_UNORM;
    case DXGI_FORMAT_B8G8R8X8_UNORM:
@@ -273,6 +287,51 @@ FormatTranslate(DXGI_FORMAT Format, BOOL depth)
                   __func__, FormatToName(Format));
       return PIPE_FORMAT_NONE;
    }
+}
+
+
+static enum pipe_format
+FormatTranslateAlternate(DXGI_FORMAT Format, BOOL depth)
+{
+   switch (Format) {
+   /* Gallium names both native byte orders of the packed D24/S8 family.
+    * The logical DXGI format is identical, so let each pipe driver choose
+    * the layout it can actually expose. */
+   case DXGI_FORMAT_R24G8_TYPELESS:
+   case DXGI_FORMAT_D24_UNORM_S8_UINT:
+      return depth ? PIPE_FORMAT_S8_UINT_Z24_UNORM : PIPE_FORMAT_NONE;
+   case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+      return PIPE_FORMAT_X8Z24_UNORM;
+   case DXGI_FORMAT_X24_TYPELESS_G8_UINT:
+      return PIPE_FORMAT_S8X24_UINT;
+   default:
+      return PIPE_FORMAT_NONE;
+   }
+}
+
+
+enum pipe_format
+FormatTranslateSupported(struct pipe_screen *screen,
+                         DXGI_FORMAT Format,
+                         BOOL depth,
+                         enum pipe_texture_target target,
+                         unsigned sample_count,
+                         unsigned bind)
+{
+   enum pipe_format format = FormatTranslate(Format, depth);
+
+   if (format != PIPE_FORMAT_NONE &&
+       screen->is_format_supported(screen, format, target,
+                                   sample_count, sample_count, bind))
+      return format;
+
+   format = FormatTranslateAlternate(Format, depth);
+   if (format != PIPE_FORMAT_NONE &&
+       screen->is_format_supported(screen, format, target,
+                                   sample_count, sample_count, bind))
+      return format;
+
+   return PIPE_FORMAT_NONE;
 }
 
 
@@ -370,6 +429,7 @@ FormatToName(DXGI_FORMAT Format)
    CASE(DXGI_FORMAT_BC5_SNORM);
    CASE(DXGI_FORMAT_B5G6R5_UNORM);
    CASE(DXGI_FORMAT_B5G5R5A1_UNORM);
+   CASE(DXGI_FORMAT_B4G4R4A4_UNORM);
    CASE(DXGI_FORMAT_B8G8R8A8_UNORM);
    CASE(DXGI_FORMAT_B8G8R8X8_UNORM);
    CASE(DXGI_FORMAT_R10G10B10_XR_BIAS_A2_UNORM);

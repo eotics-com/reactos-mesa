@@ -21,15 +21,33 @@
 
 #include <windows.h>
 
+#include "util/log.h"
 #include "util/os_time.h"
 #include "util/u_math.h"
 #include "util/u_thread.h"
 
 #include "broadcom/common/v3d_d3dkmt.h"
+#include "broadcom/common/v3d_limits.h"
 #include "broadcom/common/v3d_tfu.h"
 #include "broadcom/common/v3d_tiling.h"
+#include "v3d/v3d_bufmgr.h"
+#include "v3d/v3d_resource.h"
 #include "v3d/v3d_screen.h"
 #include "v3d_d3dkmt_public.h"
+#include "dwmpresenttracecore.h"
+
+DPT_BANK v3d_present_trace;
+
+BOOL
+v3d_d3dkmt_trace_control(const void *request, void *output, ULONG bytes)
+{
+   LONG status = DptControl(&v3d_present_trace, request, output, bytes, GetCurrentProcessId());
+   if (status < 0) {
+      SetLastError((DWORD)status & 0xffff);
+      return FALSE;
+   }
+   return TRUE;
+}
 
 /*
  * Keep the Mesa port independent of ReactOS DDK headers.  These declarations
@@ -52,10 +70,18 @@ typedef struct vc4kmt_fence {
    volatile const uint64_t *cpu_value;
 } VC4KMT_FENCE;
 
+/* WIRE format, parsed by dxgkrnl and the rpi5vc4 miniport from the list
+ * magic. Do not change its size without versioning all three. */
 typedef struct vc4kmt_resource {
    uint32_t allocation;
    uint32_t flags;
 } VC4KMT_RESOURCE;
+
+typedef struct vc4kmt_resource_owner_update {
+   uint32_t allocation;
+   void *expected_runtime_resource;
+   void *runtime_resource;
+} VC4KMT_RESOURCE_OWNER_UPDATE;
 
 typedef struct vc4kmt_cl_submit {
    uint32_t bcl_start;
@@ -100,10 +126,32 @@ typedef struct vc4kmt_info {
 } VC4KMT_INFO;
 
 vc4kmt_status vc4kmt_open(VC4KMT_DEVICE **device);
+vc4kmt_status vc4kmt_open_umd(void *adapter, void *device,
+                              const void *callbacks,
+                              VC4KMT_DEVICE **device_out);
 void vc4kmt_close(VC4KMT_DEVICE *device);
 const VC4KMT_INFO *vc4kmt_info(const VC4KMT_DEVICE *device);
 vc4kmt_status vc4kmt_bo_create(VC4KMT_DEVICE *device, uint32_t size,
                                VC4KMT_BO *bo);
+vc4kmt_status vc4kmt_bo_create_ex(VC4KMT_DEVICE *device, uint32_t size,
+                                  uint32_t flags, VC4KMT_BO *bo);
+vc4kmt_status vc4kmt_bo_create_resource_ex(VC4KMT_DEVICE *device,
+                                           uint32_t size, uint32_t flags,
+                                           void *runtime_resource,
+                                           VC4KMT_BO *bo);
+vc4kmt_status vc4kmt_bo_create_resource_private_ex(
+   VC4KMT_DEVICE *device, uint32_t size, uint32_t flags,
+   void *runtime_resource, const void *resource_private_data,
+   uint32_t resource_private_data_size, VC4KMT_BO *bo);
+vc4kmt_status vc4kmt_bo_adopt_resource(VC4KMT_DEVICE *device,
+                                       uint32_t allocation,
+                                       uint32_t size,
+                                       void *runtime_resource,
+                                       VC4KMT_BO *bo);
+vc4kmt_status vc4kmt_bo_rebind_resource_owners(
+   VC4KMT_DEVICE *device,
+   const VC4KMT_RESOURCE_OWNER_UPDATE *updates,
+   uint32_t update_count);
 vc4kmt_status vc4kmt_bo_map(VC4KMT_DEVICE *device, VC4KMT_BO *bo,
                             void **cpu_va);
 vc4kmt_status vc4kmt_bo_invalidate(VC4KMT_DEVICE *device,
@@ -127,8 +175,8 @@ vc4kmt_status vc4kmt_primary_gpuva(VC4KMT_DEVICE *device,
                                    uint32_t width, uint32_t height,
                                    uint32_t pitch, uint32_t *gpu_va);
 uint32_t vc4kmt_primary_allocation(const VC4KMT_DEVICE *device);
-vc4kmt_status vc4kmt_primary_present(VC4KMT_DEVICE *device, void *window,
-                                      const VC4KMT_FENCE *fence);
+void *vc4kmt_context(const VC4KMT_DEVICE *device, uint32_t engine);
+vc4kmt_status vc4kmt_primary_present(VC4KMT_DEVICE *device, void *window);
 void vc4kmt_primary_invalidate(VC4KMT_DEVICE *device);
 vc4kmt_status vc4kmt_bo_destroy(VC4KMT_DEVICE *device, VC4KMT_BO *bo);
 vc4kmt_status vc4kmt_submit_cl(VC4KMT_DEVICE *device,
@@ -163,11 +211,19 @@ vc4kmt_status vc4kmt_submit_csd_resources(VC4KMT_DEVICE *device,
                                           VC4KMT_FENCE *fence);
 vc4kmt_status vc4kmt_wait(VC4KMT_DEVICE *device,
                           const VC4KMT_FENCE *fence, uint32_t timeout_ms);
+vc4kmt_status vc4kmt_wait_many(VC4KMT_DEVICE *device,
+                               const VC4KMT_FENCE *fences,
+                               uint32_t fence_count, uint32_t timeout_ms);
 vc4kmt_status vc4kmt_wait_async(VC4KMT_DEVICE *device,
                                 const VC4KMT_FENCE *fence,
                                 void *completion_event);
-vc4kmt_status vc4kmt_wait_gpu(VC4KMT_DEVICE *device, uint32_t engine,
-                              const VC4KMT_FENCE *fence);
+vc4kmt_status vc4kmt_wait_async_many(VC4KMT_DEVICE *device,
+                                     const VC4KMT_FENCE *fences,
+                                     uint32_t fence_count,
+                                     void *completion_event);
+vc4kmt_status vc4kmt_wait_gpu_many(VC4KMT_DEVICE *device, uint32_t engine,
+                                   const VC4KMT_FENCE *fences,
+                                   uint32_t fence_count);
 void vc4kmt_fence_destroy(VC4KMT_DEVICE *device, VC4KMT_FENCE *fence);
 
 _Static_assert(offsetof(VC4KMT_BO, cpu_va) == 8,
@@ -180,16 +236,24 @@ _Static_assert(offsetof(VC4KMT_FENCE, cpu_value) == 16,
                "vc4kmt fence pointer offset mismatch");
 _Static_assert(sizeof(VC4KMT_CL_SUBMIT) == 7 * sizeof(uint32_t),
                "vc4kmt CL ABI mismatch");
+_Static_assert(offsetof(VC4KMT_RESOURCE_OWNER_UPDATE,
+                        expected_runtime_resource) ==
+               (sizeof(void *) == 8 ? 8 : 4),
+               "vc4kmt resource-owner ABI mismatch");
 
 #define VC4KMT_CAP_CL_SUBMIT             (1u << 0)
 #define VC4KMT_CAP_TFU_SUBMIT            (1u << 1)
 #define VC4KMT_CAP_CSD_SUBMIT            (1u << 2)
 #define VC4KMT_CAP_CACHE_FLUSH           (1u << 3)
+#define VC4KMT_CAP_BIN_RENDER_OVERLAP    (1u << 11)
 #define VC4KMT_RESOURCE_CPU_DIRTY        (1u << 0)
 #define VC4KMT_CL_FLAG_FLUSH_CACHE       (1u << 0)
+#define VC4KMT_CL_FLAG_BCL_INDEPENDENT   (1u << 1)
+#define VC4KMT_BO_CREATE_CPU_CACHED      (1u << 0)
 #define VC4KMT_ENGINE_3D                 0u
 #define VC4KMT_ENGINE_TFU                1u
 #define VC4KMT_ENGINE_CSD                2u
+#define VC4KMT_ENGINE_COUNT              3u
 #define VC4KMT_STATUS_IO_TIMEOUT         ((vc4kmt_status)0xc00000b5u)
 
 #define DWM_DX_SURFACE_INFO_MAGIC         0x53585744u
@@ -215,14 +279,16 @@ struct dwm_dx_shared_surface_info {
 
 struct v3d_d3dkmt_bo {
    VC4KMT_BO kmt;
-   struct v3d_d3dkmt_fence_ref *last_fence;
+   struct v3d_d3dkmt_fence_ref *last_writer;
+   struct v3d_d3dkmt_fence_ref *last_readers[VC4KMT_ENGINE_COUNT];
    uint32_t shared_resource;
    bool allocated;
    bool cpu_dirty;
+   bool cpu_cache_stale;
 };
 
 struct v3d_d3dkmt_syncobj {
-   struct v3d_d3dkmt_fence_ref *fence;
+   struct v3d_d3dkmt_fence_ref *fences[VC4KMT_ENGINE_COUNT];
    bool allocated;
    bool signaled;
 };
@@ -231,7 +297,6 @@ struct v3d_d3dkmt_fence_ref {
    VC4KMT_FENCE kmt;
    uint32_t references;
    uint32_t engine;
-   uint64_t visit_generation;
    bool signaled;
 };
 
@@ -247,8 +312,18 @@ struct v3d_d3dkmt_device {
    uint32_t submit_resource_capacity;
    uint32_t *submit_resource_hash;
    uint32_t submit_resource_hash_capacity;
-   uint64_t fence_visit_generation;
+   void *pending_runtime_resource;
+   const void *pending_resource_private_data;
+   uint32_t pending_resource_private_data_size;
 };
+
+static void
+v3d_d3dkmt_lock(struct v3d_d3dkmt_device *device)
+{
+   DPT_SCOPE trace = DptBegin(&v3d_present_trace, DPT_DEVICE_LOCK);
+   mtx_lock(&device->lock);
+   DptEnd(&v3d_present_trace, trace, TRUE, 0);
+}
 
 static once_flag registry_once = ONCE_FLAG_INIT;
 static mtx_t registry_lock;
@@ -346,6 +421,12 @@ v3d_d3dkmt_bo_lookup_locked(struct v3d_d3dkmt_device *device,
    return &device->bos[handle];
 }
 
+static uint32_t
+v3d_d3dkmt_submit_handle(uint32_t handle)
+{
+   return handle & V3D_D3DKMT_SUBMIT_HANDLE_MASK;
+}
+
 static int
 v3d_d3dkmt_resolve_submit_resources_locked(
    struct v3d_d3dkmt_device *device, const uint32_t *bo_handles,
@@ -397,12 +478,13 @@ v3d_d3dkmt_resolve_submit_resources_locked(
 
    for (uint32_t i = 0; i < bo_handle_count; i++) {
       struct v3d_d3dkmt_bo *bo;
+      uint32_t handle = v3d_d3dkmt_submit_handle(bo_handles[i]);
       uint32_t hash_slot;
       uint32_t resource_index;
 
-      if (!bo_handles[i])
+      if (!handle)
          continue;
-      bo = v3d_d3dkmt_bo_lookup_locked(device, bo_handles[i]);
+      bo = v3d_d3dkmt_bo_lookup_locked(device, handle);
       if (!bo || !bo->kmt.allocation) {
          errno = EINVAL;
          return -1;
@@ -442,10 +524,14 @@ v3d_d3dkmt_finish_submit_resources_locked(
 {
    for (uint32_t i = 0; i < bo_handle_count; i++) {
       struct v3d_d3dkmt_bo *bo =
-         v3d_d3dkmt_bo_lookup_locked(device, bo_handles[i]);
+         v3d_d3dkmt_bo_lookup_locked(
+            device, v3d_d3dkmt_submit_handle(bo_handles[i]));
 
-      if (bo)
+      if (bo) {
          bo->cpu_dirty = false;
+         if (bo_handles[i] & V3D_D3DKMT_SUBMIT_HANDLE_WRITE)
+            bo->cpu_cache_stale = true;
+      }
    }
 }
 
@@ -457,6 +543,22 @@ v3d_d3dkmt_syncobj_lookup_locked(struct v3d_d3dkmt_device *device,
        !device->syncobjs[handle].allocated)
       return NULL;
    return &device->syncobjs[handle];
+}
+
+static bool
+v3d_d3dkmt_syncobj_has_pending_engine_locked(
+   struct v3d_d3dkmt_device *device, uint32_t handle, uint32_t engine)
+{
+   struct v3d_d3dkmt_syncobj *syncobj;
+   struct v3d_d3dkmt_fence_ref *fence;
+
+   if (!handle)
+      return false;
+   syncobj = v3d_d3dkmt_syncobj_lookup_locked(device, handle);
+   if (!syncobj || syncobj->signaled)
+      return false;
+   fence = syncobj->fences[engine];
+   return fence && !fence->signaled;
 }
 
 static uint32_t
@@ -484,7 +586,10 @@ v3d_d3dkmt_wait_fence_locked(struct v3d_d3dkmt_device *device,
                              const VC4KMT_FENCE *fence,
                              uint32_t timeout_ms)
 {
+   DPT_SCOPE trace = DptBegin(&v3d_present_trace, DPT_BO_WAIT);
    vc4kmt_status status = vc4kmt_wait(device->kmt, fence, timeout_ms);
+   DptEnd(&v3d_present_trace, trace,
+          status >= 0 || status == VC4KMT_STATUS_IO_TIMEOUT, 0);
 
    if (status >= 0)
       return 0;
@@ -509,7 +614,6 @@ v3d_d3dkmt_fence_create(const VC4KMT_FENCE *fence, uint32_t engine)
    reference->kmt = *fence;
    reference->references = 1;
    reference->engine = engine;
-   reference->visit_generation = 0;
    reference->signaled = false;
    return reference;
 }
@@ -557,34 +661,41 @@ v3d_d3dkmt_wait_fence_ref_locked(
 }
 
 static int
+v3d_d3dkmt_wait_bo_idle_locked(struct v3d_d3dkmt_device *device,
+                               struct v3d_d3dkmt_bo *bo,
+                               uint32_t timeout_ms)
+{
+   int result;
+
+   if (bo->last_writer) {
+      result = v3d_d3dkmt_wait_fence_ref_locked(
+         device, bo->last_writer, timeout_ms);
+      if (result)
+         return result;
+      v3d_d3dkmt_fence_release_locked(device, &bo->last_writer);
+   }
+   for (uint32_t engine = 0; engine < VC4KMT_ENGINE_COUNT; engine++) {
+      if (!bo->last_readers[engine])
+         continue;
+      result = v3d_d3dkmt_wait_fence_ref_locked(
+         device, bo->last_readers[engine], timeout_ms);
+      if (result)
+         return result;
+      v3d_d3dkmt_fence_release_locked(device, &bo->last_readers[engine]);
+   }
+   return 0;
+}
+
+static int
 v3d_d3dkmt_wait_syncobj_locked(struct v3d_d3dkmt_device *device,
                                uint32_t handle, uint32_t timeout_ms)
 {
    struct v3d_d3dkmt_syncobj *syncobj =
       v3d_d3dkmt_syncobj_lookup_locked(device, handle);
-
-   if (!syncobj) {
-      errno = EINVAL;
-      return -EINVAL;
-   }
-   if (syncobj->signaled || !syncobj->fence)
-      return syncobj->signaled ? 0 : -ETIME;
-
-   int result = v3d_d3dkmt_wait_fence_ref_locked(device, syncobj->fence,
-                                                  timeout_ms);
-   if (!result) {
-      v3d_d3dkmt_fence_release_locked(device, &syncobj->fence);
-      syncobj->signaled = true;
-   }
-   return result;
-}
-
-static int
-v3d_d3dkmt_wait_syncobj_gpu_locked(struct v3d_d3dkmt_device *device,
-                                   uint32_t handle, uint32_t engine)
-{
-   struct v3d_d3dkmt_syncobj *syncobj =
-      v3d_d3dkmt_syncobj_lookup_locked(device, handle);
+   VC4KMT_FENCE fences[VC4KMT_ENGINE_COUNT];
+   bool has_fence = false;
+   uint32_t fence_count = 0;
+   vc4kmt_status status;
 
    if (!syncobj) {
       errno = EINVAL;
@@ -592,43 +703,133 @@ v3d_d3dkmt_wait_syncobj_gpu_locked(struct v3d_d3dkmt_device *device,
    }
    if (syncobj->signaled)
       return 0;
-   if (!syncobj->fence) {
-      errno = ETIME;
+
+   for (uint32_t engine = 0; engine < VC4KMT_ENGINE_COUNT; engine++) {
+      struct v3d_d3dkmt_fence_ref *fence = syncobj->fences[engine];
+
+      if (!fence)
+         continue;
+      has_fence = true;
+      if (!fence->signaled)
+         fences[fence_count++] = fence->kmt;
+   }
+   if (!has_fence)
       return -ETIME;
+
+   if (fence_count) {
+      status = vc4kmt_wait_many(device->kmt, fences, fence_count, timeout_ms);
+      if (status < 0) {
+         errno = status == VC4KMT_STATUS_IO_TIMEOUT ? ETIME : EIO;
+         return errno == ETIME ? -ETIME : -EIO;
+      }
    }
-   if (syncobj->fence->engine == engine)
-      return 0;
-   if (vc4kmt_wait_gpu(device->kmt, engine, &syncobj->fence->kmt) < 0) {
-      errno = EIO;
-      return -EIO;
+
+   for (uint32_t engine = 0; engine < VC4KMT_ENGINE_COUNT; engine++) {
+      if (syncobj->fences[engine])
+         syncobj->fences[engine]->signaled = true;
+      v3d_d3dkmt_fence_release_locked(device, &syncobj->fences[engine]);
    }
+   syncobj->signaled = true;
    return 0;
 }
 
 static int
-v3d_d3dkmt_wait_resource_fences_gpu_locked(
-   struct v3d_d3dkmt_device *device, const uint32_t *bo_handles,
-   uint32_t bo_handle_count, uint32_t engine)
+v3d_d3dkmt_add_gpu_dependency(struct v3d_d3dkmt_fence_ref *fence,
+                              uint32_t engine,
+                              VC4KMT_FENCE dependencies[VC4KMT_ENGINE_COUNT],
+                              bool used[VC4KMT_ENGINE_COUNT])
 {
-   uint64_t visit_generation = ++device->fence_visit_generation;
+   if (!fence || fence->signaled || fence->engine == engine)
+      return 0;
+   if (fence->engine >= VC4KMT_ENGINE_COUNT) {
+      errno = EINVAL;
+      return -EINVAL;
+   }
+   if (!used[fence->engine] ||
+       dependencies[fence->engine].value < fence->kmt.value)
+      dependencies[fence->engine] = fence->kmt;
+   used[fence->engine] = true;
+   return 0;
+}
 
-   for (uint32_t i = 0; i < bo_handle_count; i++) {
-      struct v3d_d3dkmt_bo *bo =
-         v3d_d3dkmt_bo_lookup_locked(device, bo_handles[i]);
-      struct v3d_d3dkmt_fence_ref *fence;
+static int
+v3d_d3dkmt_wait_submit_dependencies_locked(
+   struct v3d_d3dkmt_device *device, uint32_t engine,
+   const uint32_t *sync_handles, uint32_t sync_handle_count,
+   const uint32_t *bo_handles, uint32_t bo_handle_count)
+{
+   VC4KMT_FENCE dependencies[VC4KMT_ENGINE_COUNT];
+   VC4KMT_FENCE pending[VC4KMT_ENGINE_COUNT];
+   bool used[VC4KMT_ENGINE_COUNT] = { false };
+   uint32_t pending_count = 0;
 
-      if (!bo || !(fence = bo->last_fence) || fence->signaled ||
-          fence->engine == engine)
+   for (uint32_t i = 0; i < sync_handle_count; i++) {
+      struct v3d_d3dkmt_syncobj *syncobj;
+      bool has_fence = false;
+
+      if (!sync_handles[i])
          continue;
-      if (fence->visit_generation == visit_generation)
+      syncobj = v3d_d3dkmt_syncobj_lookup_locked(device, sync_handles[i]);
+      if (!syncobj) {
+         errno = EINVAL;
+         return -EINVAL;
+      }
+      if (syncobj->signaled)
          continue;
-      fence->visit_generation = visit_generation;
-      if (vc4kmt_wait_gpu(device->kmt, engine, &fence->kmt) < 0) {
-         errno = EIO;
-         return -EIO;
+      for (uint32_t source_engine = 0;
+           source_engine < VC4KMT_ENGINE_COUNT; source_engine++) {
+         struct v3d_d3dkmt_fence_ref *fence =
+            syncobj->fences[source_engine];
+
+         if (!fence)
+            continue;
+         has_fence = true;
+         if (v3d_d3dkmt_add_gpu_dependency(fence, engine,
+                                           dependencies, used))
+            return -1;
+      }
+      if (!has_fence) {
+         errno = ETIME;
+         return -ETIME;
       }
    }
 
+   for (uint32_t i = 0; i < bo_handle_count; i++) {
+      struct v3d_d3dkmt_bo *bo =
+         v3d_d3dkmt_bo_lookup_locked(
+            device, v3d_d3dkmt_submit_handle(bo_handles[i]));
+
+      if (!bo)
+         continue;
+      if (v3d_d3dkmt_add_gpu_dependency(bo->last_writer, engine,
+                                        dependencies, used))
+         return -1;
+      if (!(bo_handles[i] & V3D_D3DKMT_SUBMIT_HANDLE_WRITE))
+         continue;
+      for (uint32_t reader_engine = 0;
+           reader_engine < VC4KMT_ENGINE_COUNT; reader_engine++) {
+         if (v3d_d3dkmt_add_gpu_dependency(
+                bo->last_readers[reader_engine], engine,
+                dependencies, used))
+            return -1;
+      }
+   }
+
+   for (uint32_t source_engine = 0;
+        source_engine < VC4KMT_ENGINE_COUNT; source_engine++) {
+      if (used[source_engine])
+         pending[pending_count++] = dependencies[source_engine];
+   }
+   if (!pending_count)
+      return 0;
+
+   DPT_SCOPE trace = DptBegin(&v3d_present_trace, DPT_FENCE_WAIT);
+   vc4kmt_status status = vc4kmt_wait_gpu_many(device->kmt, engine, pending, pending_count);
+   DptEnd(&v3d_present_trace, trace, status >= 0, 0);
+   if (status < 0) {
+      errno = EIO;
+      return -EIO;
+   }
    return 0;
 }
 
@@ -663,18 +864,31 @@ v3d_d3dkmt_store_submit_fence_locked(struct v3d_d3dkmt_device *device,
    }
 
    if (out_sync) {
-      v3d_d3dkmt_fence_release_locked(device, &syncobj->fence);
-      syncobj->fence = v3d_d3dkmt_fence_reference(reference);
+      v3d_d3dkmt_fence_release_locked(device, &syncobj->fences[engine]);
+      syncobj->fences[engine] = v3d_d3dkmt_fence_reference(reference);
       syncobj->signaled = false;
    }
 
    for (uint32_t i = 0; i < bo_handle_count; i++) {
       struct v3d_d3dkmt_bo *bo =
-         v3d_d3dkmt_bo_lookup_locked(device, bo_handles[i]);
+         v3d_d3dkmt_bo_lookup_locked(
+            device, v3d_d3dkmt_submit_handle(bo_handles[i]));
       if (!bo)
          continue;
-      v3d_d3dkmt_fence_release_locked(device, &bo->last_fence);
-      bo->last_fence = v3d_d3dkmt_fence_reference(reference);
+      if (bo_handles[i] & V3D_D3DKMT_SUBMIT_HANDLE_WRITE) {
+         v3d_d3dkmt_fence_release_locked(device, &bo->last_writer);
+         for (uint32_t reader_engine = 0;
+              reader_engine < VC4KMT_ENGINE_COUNT; reader_engine++) {
+            v3d_d3dkmt_fence_release_locked(
+               device, &bo->last_readers[reader_engine]);
+         }
+         bo->last_writer = v3d_d3dkmt_fence_reference(reference);
+      } else {
+         v3d_d3dkmt_fence_release_locked(
+            device, &bo->last_readers[engine]);
+         bo->last_readers[engine] =
+            v3d_d3dkmt_fence_reference(reference);
+      }
    }
 
    v3d_d3dkmt_fence_release_locked(device, &reference);
@@ -693,20 +907,17 @@ v3d_d3dkmt_submit_out_sync_valid_locked(struct v3d_d3dkmt_device *device,
    return true;
 }
 
-int
-v3d_d3dkmt_open(void)
+static int
+v3d_d3dkmt_register_device(VC4KMT_DEVICE *kmt)
 {
    struct v3d_d3dkmt_device *device;
-   vc4kmt_status status;
    int fd = -1;
 
    device = calloc(1, sizeof(*device));
    if (!device)
       return -1;
 
-   status = vc4kmt_open(&device->kmt);
-   if (status < 0)
-      goto fail;
+   device->kmt = kmt;
 
    device->info = vc4kmt_info(device->kmt);
    if (!device->info || !device->info->v3d_ready ||
@@ -741,14 +952,40 @@ v3d_d3dkmt_open(void)
 fail_lock:
    mtx_destroy(&device->lock);
 fail:
-   if (device->kmt)
-      vc4kmt_close(device->kmt);
    free(device->syncobjs);
    free(device->submit_resource_hash);
    free(device->submit_resources);
    free(device->bos);
    free(device);
    return -1;
+}
+
+int
+v3d_d3dkmt_open(void)
+{
+   VC4KMT_DEVICE *kmt = NULL;
+   int fd;
+
+   if (vc4kmt_open(&kmt) < 0)
+      return -1;
+   fd = v3d_d3dkmt_register_device(kmt);
+   if (fd < 0)
+      vc4kmt_close(kmt);
+   return fd;
+}
+
+int
+v3d_d3dkmt_open_umd(void *adapter, void *device, const void *callbacks)
+{
+   VC4KMT_DEVICE *kmt = NULL;
+   int fd;
+
+   if (vc4kmt_open_umd(adapter, device, callbacks, &kmt) < 0)
+      return -1;
+   fd = v3d_d3dkmt_register_device(kmt);
+   if (fd < 0)
+      vc4kmt_close(kmt);
+   return fd;
 }
 
 void
@@ -768,25 +1005,19 @@ v3d_d3dkmt_close(int fd)
    if (!device)
       return;
 
-   mtx_lock(&device->lock);
+   v3d_d3dkmt_lock(device);
    for (uint32_t i = 1; i < device->bo_capacity; i++) {
       if (!device->bos[i].allocated)
          continue;
-      if (device->bos[i].last_fence) {
-         (void)v3d_d3dkmt_wait_fence_ref_locked(
-            device, device->bos[i].last_fence, V3D_D3DKMT_INFINITE_MS);
-         v3d_d3dkmt_fence_release_locked(device,
-                                         &device->bos[i].last_fence);
-      }
+      (void)v3d_d3dkmt_wait_bo_idle_locked(
+         device, &device->bos[i], V3D_D3DKMT_INFINITE_MS);
       (void)vc4kmt_bo_destroy(device->kmt, &device->bos[i].kmt);
    }
    for (uint32_t i = 1; i < device->syncobj_capacity; i++) {
-      if (!device->syncobjs[i].allocated || !device->syncobjs[i].fence)
+      if (!device->syncobjs[i].allocated)
          continue;
-      (void)v3d_d3dkmt_wait_fence_ref_locked(
-         device, device->syncobjs[i].fence, V3D_D3DKMT_INFINITE_MS);
-      v3d_d3dkmt_fence_release_locked(device,
-                                      &device->syncobjs[i].fence);
+      (void)v3d_d3dkmt_wait_syncobj_locked(
+         device, i, V3D_D3DKMT_INFINITE_MS);
    }
    mtx_unlock(&device->lock);
 
@@ -799,6 +1030,200 @@ v3d_d3dkmt_close(int fd)
    free(device);
 }
 
+bool
+v3d_d3dkmt_runtime_resource_pending(int fd)
+{
+   struct v3d_d3dkmt_device *device = v3d_d3dkmt_device_lookup(fd);
+   bool pending;
+
+   if (!device)
+      return false;
+   v3d_d3dkmt_lock(device);
+   pending = device->pending_runtime_resource != NULL;
+   mtx_unlock(&device->lock);
+   return pending;
+}
+
+bool
+v3d_d3dkmt_runtime_resource_begin(struct pipe_screen *screen,
+                                  void *runtime_resource,
+                                  const void *resource_private_data,
+                                  uint32_t resource_private_data_size)
+{
+   struct v3d_d3dkmt_device *device;
+   bool result = false;
+
+   if (!screen || !runtime_resource ||
+       (resource_private_data_size && !resource_private_data))
+      return false;
+   device = v3d_d3dkmt_device_lookup(v3d_screen(screen)->fd);
+   if (!device)
+      return false;
+
+   v3d_d3dkmt_lock(device);
+   if (!device->pending_runtime_resource) {
+      device->pending_runtime_resource = runtime_resource;
+      device->pending_resource_private_data = resource_private_data;
+      device->pending_resource_private_data_size =
+         resource_private_data_size;
+      result = true;
+   }
+   mtx_unlock(&device->lock);
+   return result;
+}
+
+void
+v3d_d3dkmt_runtime_resource_end(struct pipe_screen *screen)
+{
+   struct v3d_d3dkmt_device *device;
+
+   if (!screen)
+      return;
+   device = v3d_d3dkmt_device_lookup(v3d_screen(screen)->fd);
+   if (!device)
+      return;
+
+   v3d_d3dkmt_lock(device);
+   device->pending_runtime_resource = NULL;
+   device->pending_resource_private_data = NULL;
+   device->pending_resource_private_data_size = 0;
+   mtx_unlock(&device->lock);
+}
+
+uint32_t
+v3d_d3dkmt_open_runtime_resource(struct pipe_screen *screen,
+                                 void *runtime_resource,
+                                 uint32_t allocation,
+                                 uint32_t size)
+{
+   struct v3d_d3dkmt_device *device;
+   struct v3d_d3dkmt_bo *bo;
+   uint32_t handle;
+
+   if (!screen || !runtime_resource || !allocation || !size)
+      return 0;
+   device = v3d_d3dkmt_device_lookup(v3d_screen(screen)->fd);
+   if (!device)
+      return 0;
+
+   v3d_d3dkmt_lock(device);
+   handle = v3d_d3dkmt_alloc_bo_handle(device);
+   if (!handle) {
+      mtx_unlock(&device->lock);
+      return 0;
+   }
+
+   bo = &device->bos[handle];
+   memset(bo, 0, sizeof(*bo));
+   if (vc4kmt_bo_adopt_resource(device->kmt, allocation, size,
+                                runtime_resource, &bo->kmt) < 0) {
+      memset(bo, 0, sizeof(*bo));
+      handle = 0;
+   } else {
+      bo->allocated = true;
+   }
+   mtx_unlock(&device->lock);
+   return handle;
+}
+
+void
+v3d_d3dkmt_discard_runtime_resource(struct pipe_screen *screen,
+                                    uint32_t handle)
+{
+   struct drm_gem_close close_bo = { .handle = handle };
+
+   if (screen && handle)
+      (void)drmIoctl(v3d_screen(screen)->fd, DRM_IOCTL_GEM_CLOSE, &close_bo);
+}
+
+uint32_t
+v3d_d3dkmt_resource_allocation(struct pipe_screen *screen,
+                               struct pipe_resource *resource)
+{
+   struct v3d_d3dkmt_device *device;
+   struct v3d_d3dkmt_bo *bo;
+   struct v3d_resource *v3d_resource_object;
+   uint32_t allocation = 0;
+
+   if (!screen || !resource)
+      return 0;
+   device = v3d_d3dkmt_device_lookup(v3d_screen(screen)->fd);
+   v3d_resource_object = v3d_resource(resource);
+   if (!device || !v3d_resource_object->bo)
+      return 0;
+
+   v3d_d3dkmt_lock(device);
+   bo = v3d_d3dkmt_bo_lookup_locked(device,
+                                    v3d_resource_object->bo->handle);
+   if (bo)
+      allocation = bo->kmt.allocation;
+   mtx_unlock(&device->lock);
+   return allocation;
+}
+
+bool
+v3d_d3dkmt_rebind_runtime_resources(
+   struct pipe_screen *screen,
+   struct pipe_resource *const *resources,
+   void *const *runtime_resources,
+   unsigned count)
+{
+   VC4KMT_RESOURCE_OWNER_UPDATE updates[16];
+   struct v3d_d3dkmt_device *device;
+   bool result = false;
+
+   if (!screen || !resources || !runtime_resources ||
+       count < 2 || count > ARRAY_SIZE(updates))
+      return false;
+   device = v3d_d3dkmt_device_lookup(v3d_screen(screen)->fd);
+   if (!device)
+      return false;
+
+   v3d_d3dkmt_lock(device);
+   for (unsigned destination = 0; destination < count; destination++) {
+      unsigned source = destination + 1 == count ? 0 : destination + 1;
+      struct v3d_resource *rsc;
+      struct v3d_d3dkmt_bo *bo;
+
+      if (!resources[source] || !runtime_resources[source] ||
+          !runtime_resources[destination])
+         goto done;
+      rsc = v3d_resource(resources[source]);
+      if (!rsc->bo)
+         goto done;
+      bo = v3d_d3dkmt_bo_lookup_locked(device, rsc->bo->handle);
+      if (!bo || !bo->kmt.allocation)
+         goto done;
+
+      updates[destination].allocation = bo->kmt.allocation;
+      updates[destination].expected_runtime_resource =
+         runtime_resources[source];
+      updates[destination].runtime_resource =
+         runtime_resources[destination];
+   }
+
+   result = vc4kmt_bo_rebind_resource_owners(
+      device->kmt, updates, count) >= 0;
+
+done:
+   mtx_unlock(&device->lock);
+   return result;
+}
+
+void *
+v3d_d3dkmt_present_context(struct pipe_screen *screen)
+{
+   struct v3d_d3dkmt_device *device;
+
+   if (!screen)
+      return NULL;
+   device = v3d_d3dkmt_device_lookup(v3d_screen(screen)->fd);
+   if (!device)
+      return NULL;
+
+   return vc4kmt_context(device->kmt, VC4KMT_ENGINE_TFU);
+}
+
 void *
 v3d_d3dkmt_bo_map(int fd, uint32_t handle)
 {
@@ -809,7 +1234,7 @@ v3d_d3dkmt_bo_map(int fd, uint32_t handle)
    if (!device)
       return NULL;
 
-   mtx_lock(&device->lock);
+   v3d_d3dkmt_lock(device);
    bo = v3d_d3dkmt_bo_lookup_locked(device, handle);
    if (bo && vc4kmt_bo_map(device->kmt, &bo->kmt, &map) < 0)
       map = NULL;
@@ -817,6 +1242,37 @@ v3d_d3dkmt_bo_map(int fd, uint32_t handle)
    return map;
 }
 
+int
+v3d_d3dkmt_bo_prepare_cpu_access(int fd, uint32_t handle, int write)
+{
+   struct v3d_d3dkmt_device *device = v3d_d3dkmt_device_lookup(fd);
+   struct v3d_d3dkmt_bo *bo;
+   vc4kmt_status status = -1;
+
+   if (!device)
+      return -1;
+
+   v3d_d3dkmt_lock(device);
+   bo = v3d_d3dkmt_bo_lookup_locked(device, handle);
+   if (bo) {
+      status = 0;
+      if (bo->cpu_cache_stale) {
+         DPT_SCOPE trace = DptBegin(&v3d_present_trace, DPT_INVALIDATE);
+         status = vc4kmt_bo_invalidate(device->kmt, &bo->kmt,
+                                       0, bo->kmt.size);
+         DptEnd(&v3d_present_trace, trace, status >= 0, bo->kmt.size);
+         if (status >= 0)
+            bo->cpu_cache_stale = false;
+      }
+      if (status >= 0 && write)
+         bo->cpu_dirty = true;
+   }
+   mtx_unlock(&device->lock);
+   return status;
+}
+
+/* A mapped range can be written after an earlier submission cleared dirty.
+ * Publish those writes without invalidating the CPU cache containing them. */
 int
 v3d_d3dkmt_bo_mark_cpu_dirty(int fd, uint32_t handle)
 {
@@ -827,7 +1283,7 @@ v3d_d3dkmt_bo_mark_cpu_dirty(int fd, uint32_t handle)
    if (!device)
       return -1;
 
-   mtx_lock(&device->lock);
+   v3d_d3dkmt_lock(device);
    bo = v3d_d3dkmt_bo_lookup_locked(device, handle);
    if (bo) {
       bo->cpu_dirty = true;
@@ -838,7 +1294,53 @@ v3d_d3dkmt_bo_mark_cpu_dirty(int fd, uint32_t handle)
 }
 
 int
-v3d_d3dkmt_bo_cpu_dirty(int fd, uint32_t handle)
+v3d_d3dkmt_bo_copy_cpu_contents(int fd, uint32_t source_handle,
+                                 uint32_t destination_handle, uint32_t size)
+{
+   struct v3d_d3dkmt_device *device = v3d_d3dkmt_device_lookup(fd);
+   struct v3d_d3dkmt_bo *source;
+   struct v3d_d3dkmt_bo *destination;
+   void *source_map = NULL;
+   void *destination_map = NULL;
+   int result = -1;
+
+   if (!device)
+      return -1;
+
+   v3d_d3dkmt_lock(device);
+   source = v3d_d3dkmt_bo_lookup_locked(device, source_handle);
+   destination = v3d_d3dkmt_bo_lookup_locked(device, destination_handle);
+   if (!source || !destination || size > source->kmt.size ||
+       size > destination->kmt.size)
+      goto done;
+
+   if (source->cpu_cache_stale) {
+      result = 0;
+      goto done;
+   }
+
+   if (destination->cpu_cache_stale &&
+       vc4kmt_bo_invalidate(device->kmt, &destination->kmt,
+                            0, destination->kmt.size) < 0)
+      goto done;
+
+   destination->cpu_cache_stale = false;
+   if (vc4kmt_bo_map(device->kmt, &source->kmt, &source_map) < 0 ||
+       vc4kmt_bo_map(device->kmt, &destination->kmt,
+                     &destination_map) < 0)
+      goto done;
+
+   memcpy(destination_map, source_map, size);
+   destination->cpu_dirty = true;
+   result = 1;
+
+done:
+   mtx_unlock(&device->lock);
+   return result;
+}
+
+int
+v3d_d3dkmt_bo_mark_external_dirty(int fd, uint32_t handle)
 {
    struct v3d_d3dkmt_device *device = v3d_d3dkmt_device_lookup(fd);
    struct v3d_d3dkmt_bo *bo;
@@ -847,32 +1349,15 @@ v3d_d3dkmt_bo_cpu_dirty(int fd, uint32_t handle)
    if (!device)
       return -1;
 
-   mtx_lock(&device->lock);
-   bo = v3d_d3dkmt_bo_lookup_locked(device, handle);
-   if (bo)
-      result = bo->cpu_dirty ? 1 : 0;
-   mtx_unlock(&device->lock);
-   return result;
-}
-
-int
-v3d_d3dkmt_bo_invalidate(int fd, uint32_t handle)
-{
-   struct v3d_d3dkmt_device *device = v3d_d3dkmt_device_lookup(fd);
-   struct v3d_d3dkmt_bo *bo;
-   vc4kmt_status status = -1;
-
-   if (!device)
-      return -1;
-
-   mtx_lock(&device->lock);
+   v3d_d3dkmt_lock(device);
    bo = v3d_d3dkmt_bo_lookup_locked(device, handle);
    if (bo) {
-      status = vc4kmt_bo_invalidate(device->kmt, &bo->kmt,
-                                    0, bo->kmt.size);
+      bo->cpu_dirty = true;
+      bo->cpu_cache_stale = true;
+      result = 0;
    }
    mtx_unlock(&device->lock);
-   return status;
+   return result;
 }
 
 int
@@ -916,7 +1401,7 @@ v3d_d3dkmt_present_linear(int fd, uintptr_t window, uint32_t source_handle,
    destination_offset = (uint64_t)destination_y * primary_pitch +
                         (uint64_t)destination_x * 4;
 
-   mtx_lock(&device->lock);
+   v3d_d3dkmt_lock(device);
    source = v3d_d3dkmt_bo_lookup_locked(device, source_handle);
    if (!source || source_end > source->kmt.size ||
        destination_offset > UINT32_MAX) {
@@ -928,8 +1413,8 @@ v3d_d3dkmt_present_linear(int fd, uintptr_t window, uint32_t source_handle,
       goto done;
    }
 
-   if (v3d_d3dkmt_wait_resource_fences_gpu_locked(
-          device, &source_handle, 1, VC4KMT_ENGINE_TFU))
+   if (v3d_d3dkmt_wait_submit_dependencies_locked(
+          device, VC4KMT_ENGINE_TFU, NULL, 0, &source_handle, 1))
       goto done;
 
    if (vc4kmt_primary_gpuva(device->kmt, screen_width, screen_height,
@@ -971,9 +1456,11 @@ v3d_d3dkmt_present_linear(int fd, uintptr_t window, uint32_t source_handle,
    submit.regs[6] = primary_gpu_va + (uint32_t)destination_offset;
    submit.regs[7] = (height << 16) | width;
 
+   DPT_SCOPE submit_trace = DptBegin(&v3d_present_trace, DPT_KMT_SUBMIT);
    vc4kmt_status submit_status =
       vc4kmt_submit_tfu_resources(device->kmt, &submit, resources,
                                   ARRAY_SIZE(resources), &fence);
+   DptEnd(&v3d_present_trace, submit_trace, submit_status >= 0, 0);
    if (submit_status < 0) {
       vc4kmt_primary_invalidate(device->kmt);
       errno = EIO;
@@ -984,8 +1471,10 @@ v3d_d3dkmt_present_linear(int fd, uintptr_t window, uint32_t source_handle,
                                                    &source_handle, 1,
                                                    VC4KMT_ENGINE_TFU, &fence);
    if (!result) {
+      DPT_SCOPE trace = DptBegin(&v3d_present_trace, DPT_KMT_PRESENT);
       vc4kmt_status present_status =
-         vc4kmt_primary_present(device->kmt, (void *)window, &fence);
+         vc4kmt_primary_present(device->kmt, (void *)window);
+      DptEnd(&v3d_present_trace, trace, present_status == 0, 0);
       if (present_status != 0) {
          errno = EIO;
          result = -1;
@@ -1008,7 +1497,7 @@ drmSyncobjCreate(int fd, uint32_t flags, uint32_t *handle)
       return -EINVAL;
    }
 
-   mtx_lock(&device->lock);
+   v3d_d3dkmt_lock(device);
    new_handle = v3d_d3dkmt_alloc_syncobj_handle(device);
    if (!new_handle) {
       mtx_unlock(&device->lock);
@@ -1037,14 +1526,15 @@ drmSyncobjDestroy(int fd, uint32_t handle)
       return -EINVAL;
    }
 
-   mtx_lock(&device->lock);
+   v3d_d3dkmt_lock(device);
    syncobj = v3d_d3dkmt_syncobj_lookup_locked(device, handle);
    if (!syncobj) {
       mtx_unlock(&device->lock);
       errno = EINVAL;
       return -EINVAL;
    }
-   v3d_d3dkmt_fence_release_locked(device, &syncobj->fence);
+   for (uint32_t engine = 0; engine < VC4KMT_ENGINE_COUNT; engine++)
+      v3d_d3dkmt_fence_release_locked(device, &syncobj->fences[engine]);
    memset(syncobj, 0, sizeof(*syncobj));
    mtx_unlock(&device->lock);
    return 0;
@@ -1065,7 +1555,7 @@ drmSyncobjWait(int fd, const uint32_t *handles, unsigned num_handles,
       return -EINVAL;
    }
 
-   mtx_lock(&device->lock);
+   v3d_d3dkmt_lock(device);
    for (unsigned i = 0; i < num_handles; i++) {
       result = v3d_d3dkmt_wait_syncobj_locked(device, handles[i], timeout_ms);
       if (result) {
@@ -1090,6 +1580,9 @@ v3d_d3dkmt_syncobj_signal_event(int fd, uint32_t handle, void *event)
 {
    struct v3d_d3dkmt_device *device = v3d_d3dkmt_device_lookup(fd);
    struct v3d_d3dkmt_syncobj *syncobj;
+   VC4KMT_FENCE fences[VC4KMT_ENGINE_COUNT];
+   bool has_fence = false;
+   uint32_t fence_count = 0;
    int result = 0;
 
    if (!device || !event) {
@@ -1097,18 +1590,27 @@ v3d_d3dkmt_syncobj_signal_event(int fd, uint32_t handle, void *event)
       return -EINVAL;
    }
 
-   mtx_lock(&device->lock);
+   v3d_d3dkmt_lock(device);
    syncobj = v3d_d3dkmt_syncobj_lookup_locked(device, handle);
    if (!syncobj) {
       result = -EINVAL;
    } else if (syncobj->signaled) {
       if (!SetEvent((HANDLE)event))
          result = -EIO;
-   } else if (!syncobj->fence) {
-      result = -ETIME;
    } else {
-      if (vc4kmt_wait_async(device->kmt, &syncobj->fence->kmt,
-                            event) < 0)
+      for (uint32_t engine = 0; engine < VC4KMT_ENGINE_COUNT; engine++) {
+         struct v3d_d3dkmt_fence_ref *fence = syncobj->fences[engine];
+
+         if (!fence)
+            continue;
+         has_fence = true;
+         if (!fence->signaled)
+            fences[fence_count++] = fence->kmt;
+      }
+      if (!has_fence)
+         result = -ETIME;
+      else if (vc4kmt_wait_async_many(device->kmt, fences, fence_count,
+                                      event) < 0)
          result = -EIO;
    }
    mtx_unlock(&device->lock);
@@ -1130,7 +1632,7 @@ v3d_d3dkmt_syncobj_clone(int fd, uint32_t source, uint32_t *destination)
       return -EINVAL;
    }
 
-   mtx_lock(&device->lock);
+   v3d_d3dkmt_lock(device);
    source_syncobj = v3d_d3dkmt_syncobj_lookup_locked(device, source);
    handle = source_syncobj ? v3d_d3dkmt_alloc_syncobj_handle(device) : 0;
    if (!source_syncobj || !handle) {
@@ -1143,9 +1645,11 @@ v3d_d3dkmt_syncobj_clone(int fd, uint32_t source, uint32_t *destination)
    source_syncobj = v3d_d3dkmt_syncobj_lookup_locked(device, source);
    assert(source_syncobj);
    device->syncobjs[handle] = *source_syncobj;
-   if (source_syncobj->fence)
-      device->syncobjs[handle].fence =
-         v3d_d3dkmt_fence_reference(source_syncobj->fence);
+   for (uint32_t engine = 0; engine < VC4KMT_ENGINE_COUNT; engine++) {
+      if (source_syncobj->fences[engine])
+         device->syncobjs[handle].fences[engine] =
+            v3d_d3dkmt_fence_reference(source_syncobj->fences[engine]);
+   }
    device->syncobjs[handle].allocated = true;
    *destination = handle;
    mtx_unlock(&device->lock);
@@ -1271,17 +1775,12 @@ v3d_d3dkmt_submit_cl_locked(struct v3d_d3dkmt_device *device,
    if (!v3d_d3dkmt_submit_out_sync_valid_locked(device, submit->out_sync))
       return -1;
 
-   if (submit->in_sync_bcl &&
-       v3d_d3dkmt_wait_syncobj_gpu_locked(device, submit->in_sync_bcl,
-                                          VC4KMT_ENGINE_3D))
-      return -1;
-   if (submit->in_sync_rcl &&
-       submit->in_sync_rcl != submit->in_sync_bcl &&
-       v3d_d3dkmt_wait_syncobj_gpu_locked(device, submit->in_sync_rcl,
-                                          VC4KMT_ENGINE_3D))
-      return -1;
-   if (v3d_d3dkmt_wait_resource_fences_gpu_locked(
-          device, bo_handles, submit->bo_handle_count, VC4KMT_ENGINE_3D))
+   const uint32_t sync_handles[] = {
+      submit->in_sync_bcl, submit->in_sync_rcl,
+   };
+   if (v3d_d3dkmt_wait_submit_dependencies_locked(
+          device, VC4KMT_ENGINE_3D, sync_handles, ARRAY_SIZE(sync_handles),
+          bo_handles, submit->bo_handle_count))
       return -1;
 
    if (v3d_d3dkmt_resolve_submit_resources_locked(
@@ -1291,10 +1790,21 @@ v3d_d3dkmt_submit_cl_locked(struct v3d_d3dkmt_device *device,
    uint32_t kmt_flags =
       (submit->flags & DRM_V3D_SUBMIT_CL_FLUSH_CACHE) ?
       VC4KMT_CL_FLAG_FLUSH_CACHE : 0;
+
+   if (submit->bcl_start != submit->bcl_end &&
+       (device->info->caps & VC4KMT_CAP_BIN_RENDER_OVERLAP) &&
+       !v3d_d3dkmt_syncobj_has_pending_engine_locked(
+          device, submit->in_sync_bcl, VC4KMT_ENGINE_3D)) {
+      kmt_flags |= VC4KMT_CL_FLAG_BCL_INDEPENDENT;
+   }
+   DPT_SCOPE submit_trace = DptBegin(&v3d_present_trace, DPT_KMT_SUBMIT);
    vc4kmt_status submit_status =
       vc4kmt_submit_cl_resources_ex(device->kmt, &kmt_submit, kmt_flags,
                                     resources, resource_count, &fence);
+   DptEnd(&v3d_present_trace, submit_trace, submit_status >= 0, 0);
    if (submit_status < 0) {
+      mesa_loge_once("V3D CL submit failed: status=%08x resources=%u",
+                     (unsigned)submit_status, resource_count);
       errno = EIO;
       return -1;
    }
@@ -1332,21 +1842,22 @@ v3d_d3dkmt_submit_tfu_locked(struct v3d_d3dkmt_device *device,
    }
    if (!v3d_d3dkmt_submit_out_sync_valid_locked(device, submit->out_sync))
       return -1;
-   if (submit->in_sync &&
-       v3d_d3dkmt_wait_syncobj_gpu_locked(device, submit->in_sync,
-                                          VC4KMT_ENGINE_TFU))
-      return -1;
-   if (v3d_d3dkmt_wait_resource_fences_gpu_locked(
-          device, handles, ARRAY_SIZE(handles), VC4KMT_ENGINE_TFU))
+   if (v3d_d3dkmt_wait_submit_dependencies_locked(
+          device, VC4KMT_ENGINE_TFU, &submit->in_sync, 1,
+          handles, ARRAY_SIZE(handles)))
       return -1;
    if (v3d_d3dkmt_resolve_submit_resources_locked(
           device, handles, ARRAY_SIZE(handles),
           &resources, &resource_count))
       return -1;
+   DPT_SCOPE submit_trace = DptBegin(&v3d_present_trace, DPT_KMT_SUBMIT);
    vc4kmt_status submit_status =
       vc4kmt_submit_tfu_resources(device->kmt, &kmt_submit, resources,
                                   resource_count, &fence);
+   DptEnd(&v3d_present_trace, submit_trace, submit_status >= 0, 0);
    if (submit_status < 0) {
+      mesa_loge_once("V3D TFU submit failed: status=%08x resources=%u",
+                     (unsigned)submit_status, resource_count);
       errno = EIO;
       return -1;
    }
@@ -1376,20 +1887,19 @@ v3d_d3dkmt_submit_csd_locked(struct v3d_d3dkmt_device *device,
    if (!v3d_d3dkmt_submit_out_sync_valid_locked(device, submit->out_sync))
       return -1;
    memcpy(kmt_submit.cfg, submit->cfg, sizeof(submit->cfg));
-   if (submit->in_sync &&
-       v3d_d3dkmt_wait_syncobj_gpu_locked(device, submit->in_sync,
-                                          VC4KMT_ENGINE_CSD))
-      return -1;
-   if (v3d_d3dkmt_wait_resource_fences_gpu_locked(
-          device, bo_handles, submit->bo_handle_count, VC4KMT_ENGINE_CSD))
+   if (v3d_d3dkmt_wait_submit_dependencies_locked(
+          device, VC4KMT_ENGINE_CSD, &submit->in_sync, 1,
+          bo_handles, submit->bo_handle_count))
       return -1;
    if (v3d_d3dkmt_resolve_submit_resources_locked(
           device, bo_handles, submit->bo_handle_count,
           &resources, &resource_count))
       return -1;
+   DPT_SCOPE submit_trace = DptBegin(&v3d_present_trace, DPT_KMT_SUBMIT);
    vc4kmt_status submit_status =
       vc4kmt_submit_csd_resources(device->kmt, &kmt_submit, resources,
                                   resource_count, &fence);
+   DptEnd(&v3d_present_trace, submit_trace, submit_status >= 0, 0);
    if (submit_status < 0) {
       errno = EIO;
       return -1;
@@ -1403,8 +1913,8 @@ v3d_d3dkmt_submit_csd_locked(struct v3d_d3dkmt_device *device,
    return result;
 }
 
-int
-drmIoctl(int fd, unsigned long request, void *arg)
+static int
+v3d_d3dkmt_ioctl_impl(int fd, unsigned long request, void *arg)
 {
    struct v3d_d3dkmt_device *device = v3d_d3dkmt_device_lookup(fd);
    int result = -1;
@@ -1414,23 +1924,39 @@ drmIoctl(int fd, unsigned long request, void *arg)
       return -1;
    }
 
-   mtx_lock(&device->lock);
+   v3d_d3dkmt_lock(device);
    switch (request) {
    case DRM_IOCTL_V3D_GET_PARAM:
       result = v3d_d3dkmt_get_param(device, arg);
       break;
    case DRM_IOCTL_V3D_CREATE_BO: {
       struct drm_v3d_create_bo *create = arg;
-      uint32_t handle = v3d_d3dkmt_alloc_bo_handle(device);
+      uint32_t handle;
+      uint32_t flags;
       struct v3d_d3dkmt_bo *bo;
 
+      if (create->flags & ~V3D_D3DKMT_CREATE_BO_CPU_CACHED) {
+         errno = EINVAL;
+         break;
+      }
+      handle = v3d_d3dkmt_alloc_bo_handle(device);
       if (!handle) {
          errno = ENOMEM;
          break;
       }
+      flags = (create->flags & V3D_D3DKMT_CREATE_BO_CPU_CACHED) ?
+              VC4KMT_BO_CREATE_CPU_CACHED : 0;
       bo = &device->bos[handle];
       memset(bo, 0, sizeof(*bo));
-      if (vc4kmt_bo_create(device->kmt, create->size, &bo->kmt) < 0) {
+      DPT_SCOPE trace = DptBegin(&v3d_present_trace, DPT_BO_CREATE);
+      vc4kmt_status status = vc4kmt_bo_create_resource_private_ex(
+         device->kmt, create->size, flags,
+         device->pending_runtime_resource,
+         device->pending_resource_private_data,
+         device->pending_resource_private_data_size,
+         &bo->kmt);
+      DptEnd(&v3d_present_trace, trace, status >= 0, create->size);
+      if (status < 0) {
          errno = ENOMEM;
          break;
       }
@@ -1472,20 +1998,13 @@ drmIoctl(int fd, unsigned long request, void *arg)
          errno = EINVAL;
          break;
       }
-      if (!bo->last_fence) {
-         result = 0;
-         break;
-      }
-      result = v3d_d3dkmt_wait_fence_ref_locked(
-         device, bo->last_fence,
+      result = v3d_d3dkmt_wait_bo_idle_locked(
+         device, bo,
          wait->timeout_ns == UINT64_MAX ? V3D_D3DKMT_INFINITE_MS :
          (uint32_t)MIN2(DIV_ROUND_UP(wait->timeout_ns, 1000000ull),
                         (uint64_t)UINT32_MAX - 1));
-      if (result) {
+      if (result)
          result = -1;
-      } else {
-         v3d_d3dkmt_fence_release_locked(device, &bo->last_fence);
-      }
       break;
    }
    case DRM_IOCTL_GEM_CLOSE: {
@@ -1498,10 +2017,8 @@ drmIoctl(int fd, unsigned long request, void *arg)
          errno = EINVAL;
          break;
       }
-      if (bo->last_fence)
-         wait_result = v3d_d3dkmt_wait_fence_ref_locked(
-            device, bo->last_fence, V3D_D3DKMT_INFINITE_MS);
-      v3d_d3dkmt_fence_release_locked(device, &bo->last_fence);
+      wait_result = v3d_d3dkmt_wait_bo_idle_locked(
+         device, bo, V3D_D3DKMT_INFINITE_MS);
       vc4kmt_status status = bo->shared_resource ?
          vc4kmt_bo_close_shared(device->kmt, &bo->kmt,
                                 bo->shared_resource) :
@@ -1593,6 +2110,15 @@ drmIoctl(int fd, unsigned long request, void *arg)
    return result;
 }
 
+int
+drmIoctl(int fd, unsigned long request, void *arg)
+{
+   DPT_SCOPE trace = DptBegin(&v3d_present_trace, DPT_IOCTL);
+   int result = v3d_d3dkmt_ioctl_impl(fd, request, arg);
+   DptEnd(&v3d_present_trace, trace, result >= 0 || errno == ETIME, 0);
+   return result;
+}
+
 bool
 v3d_d3dkmt_shared_surface_info(struct pipe_screen *screen,
                                uintptr_t shared_handle,
@@ -1614,7 +2140,7 @@ v3d_d3dkmt_shared_surface_info(struct pipe_screen *screen,
       return false;
 
    memset(&info, 0, sizeof(info));
-   mtx_lock(&device->lock);
+   v3d_d3dkmt_lock(device);
    status = vc4kmt_shared_resource_info(device->kmt,
                                         (uint32_t)shared_handle,
                                         &info, sizeof(info),
@@ -1639,6 +2165,19 @@ struct pipe_screen *
 v3d_d3dkmt_screen_create(const struct pipe_screen_config *config)
 {
    int fd = v3d_d3dkmt_open();
+
+   if (fd < 0)
+      return NULL;
+
+   return v3d_screen_create(fd, config, NULL);
+}
+
+struct pipe_screen *
+v3d_d3dkmt_screen_create_umd(const struct pipe_screen_config *config,
+                             void *adapter, void *device,
+                             const void *callbacks)
+{
+   int fd = v3d_d3dkmt_open_umd(adapter, device, callbacks);
 
    if (fd < 0)
       return NULL;

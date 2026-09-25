@@ -293,6 +293,7 @@ v3dX(emit_state)(struct pipe_context *pctx)
 
         if (v3d->dirty & (V3D_DIRTY_RASTERIZER |
                           V3D_DIRTY_ZSA |
+                          V3D_DIRTY_FRAMEBUFFER |
                           V3D_DIRTY_PRIM_MODE |
                           V3D_DIRTY_BLEND)) {
                 const enum mesa_prim reduced_prim =
@@ -347,7 +348,7 @@ v3dX(emit_state)(struct pipe_context *pctx)
                         config.early_z_updates_enable =
                                 (job->ez_state != V3D_EZ_DISABLED);
 #endif
-                        if (v3d->zsa->base.depth_enabled) {
+                        if (job->zsbuf.texture && v3d->zsa->base.depth_enabled) {
                                 config.z_updates_enable =
                                         v3d->zsa->base.depth_writemask;
 #if V3D_VERSION == 42
@@ -357,10 +358,12 @@ v3dX(emit_state)(struct pipe_context *pctx)
                                 config.depth_test_function =
                                         v3d->zsa->base.depth_func;
                         } else {
-                                config.depth_test_function = PIPE_FUNC_ALWAYS;
+                                config.depth_test_function =
+                                        V3D_COMPARE_FUNC_ALWAYS;
                         }
 
                         config.stencil_enable =
+                                job->zsbuf.texture &&
                                 v3d->zsa->base.stencil[0].enabled;
 
                         /* Use nicer line caps when line smoothing is
@@ -718,6 +721,10 @@ v3dX(emit_state)(struct pipe_context *pctx)
         }
 
         if (v3d->dirty & V3D_DIRTY_OQ) {
+#ifdef _WIN32
+                if (v3d->active_queries && v3d->current_oq)
+                        v3d_job_add_write_bo(job, v3d->current_oq);
+#endif
                 cl_emit(&job->bcl, OCCLUSION_QUERY_COUNTER, counter) {
                         if (v3d->active_queries && v3d->current_oq) {
                                 counter.address = cl_address(v3d->current_oq, 0);

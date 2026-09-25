@@ -25,6 +25,7 @@
  *
  *
  **************************************************************************/
+#include <stdint.h>
 
 
 #include "util/u_debug.h"
@@ -36,8 +37,37 @@
 #include "winddk_compat.h"
 #include <d3dkmthk.h>
 
+#include "Resource.h"
+
 extern struct pipe_screen *
-d3d10_create_screen(void);
+d3d10_create_screen(void *adapter, void *device, const void *callbacks);
+
+extern struct pipe_resource *
+d3d10_create_resource(struct pipe_screen *screen,
+                      const struct pipe_resource *templ,
+                      const D3D10GalliumResourceDesc *desc,
+                      void *runtime_resource, D3DKMT_HANDLE *allocation);
+
+extern bool
+d3d10_get_open_resource_desc(
+   const D3D10DDIARG_OPENRESOURCE *open_resource,
+   D3D10GalliumResourceDesc *desc);
+
+extern struct pipe_resource *
+d3d10_open_resource(struct pipe_screen *screen,
+                    const struct pipe_resource *templ,
+                    const D3D10DDIARG_OPENRESOURCE *open_resource,
+                    void *runtime_resource,
+                    D3DKMT_HANDLE *allocation);
+
+extern void *
+d3d10_get_present_context(struct pipe_screen *screen);
+
+extern bool
+d3d10_rotate_resource_identities(struct pipe_context *pipe,
+                                 struct pipe_resource *const *resources,
+                                 void *const *runtime_resources,
+                                 unsigned count);
 
 static HDC
 d3d10_gdi_acquire_hdc(void *winsys_drawable_handle) {
@@ -56,12 +86,16 @@ d3d10_gdi_release_hdc(void *winsys_drawable_handle, HDC hDC) {
 }
 
 struct pipe_screen *
-d3d10_create_screen(void)
+d3d10_create_screen(void *adapter, void *device, const void *callbacks)
 {
    const char *default_driver;
    const char *driver;
    struct pipe_screen *screen = NULL;
    struct sw_winsys *winsys;
+
+   (void)adapter;
+   (void)device;
+   (void)callbacks;
 
    winsys = gdi_create_sw_winsys(d3d10_gdi_acquire_hdc, d3d10_gdi_release_hdc);
    if(!winsys)
@@ -95,5 +129,64 @@ d3d10_create_screen(void)
 no_screen:
    winsys->destroy(winsys);
 no_winsys:
+   return NULL;
+}
+
+void *
+d3d10_get_present_context(struct pipe_screen *screen)
+{
+   (void)screen;
+   return NULL;
+}
+
+bool
+d3d10_rotate_resource_identities(struct pipe_context *pipe,
+                                 struct pipe_resource *const *resources,
+                                 void *const *runtime_resources,
+                                 unsigned count)
+{
+   (void)pipe;
+   (void)resources;
+   (void)runtime_resources;
+   (void)count;
+   return false;
+}
+
+struct pipe_resource *
+d3d10_create_resource(struct pipe_screen *screen,
+                      const struct pipe_resource *templ,
+                      const D3D10GalliumResourceDesc *desc,
+                      void *runtime_resource, D3DKMT_HANDLE *allocation)
+{
+   (void)desc;
+   (void)runtime_resource;
+   if (allocation)
+      *allocation = 0;
+   return screen->resource_create(screen, templ);
+}
+
+bool
+d3d10_get_open_resource_desc(
+   const D3D10DDIARG_OPENRESOURCE *open_resource,
+   D3D10GalliumResourceDesc *desc)
+{
+   (void)open_resource;
+   (void)desc;
+   return false;
+}
+
+struct pipe_resource *
+d3d10_open_resource(struct pipe_screen *screen,
+                    const struct pipe_resource *templ,
+                    const D3D10DDIARG_OPENRESOURCE *open_resource,
+                    void *runtime_resource,
+                    D3DKMT_HANDLE *allocation)
+{
+   (void)screen;
+   (void)templ;
+   (void)open_resource;
+   (void)runtime_resource;
+   if (allocation)
+      *allocation = 0;
    return NULL;
 }

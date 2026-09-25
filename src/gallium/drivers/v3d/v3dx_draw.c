@@ -1132,6 +1132,38 @@ v3d_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
 
         struct v3d_context *v3d = v3d_context(pctx);
 
+        /* V3D does not have a fixed-function cull-distance unit.  Insert a
+         * GPU geometry stage which evaluates the per-primitive Direct3D/GL
+         * rule before any normal draw setup.  Binding it through the regular
+         * Gallium interface keeps shader linking, primitive queries and VPM
+         * configuration on the same path as an application geometry shader.
+         */
+        if (!v3d->prog.bind_gs && v3d->prog.bind_vs &&
+            v3d->prog.bind_vs->base.ir.nir->info.cull_distance_array_size) {
+                struct v3d_uncompiled_shader *gs =
+                        v3d_get_cull_distance_gs(v3d, info->mode);
+
+                pctx->bind_gs_state(pctx, gs);
+                v3d_draw_vbo(pctx, info, drawid_offset, indirect, draws,
+                             num_draws);
+                pctx->bind_gs_state(pctx, NULL);
+                return;
+        }
+
+        if (indirect && indirect->buffer && v3d->prog.bind_vs &&
+            BITSET_TEST(v3d->prog.bind_vs->base.ir.nir->info.system_values_read,
+                        SYSTEM_VALUE_VERTEX_ID_ZERO_BASE)) {
+                util_draw_indirect(pctx, info, drawid_offset, indirect);
+                return;
+        }
+
+        uint32_t first_vertex = draws ?
+                (info->index_size ? draws[0].index_bias : draws[0].start) : 0;
+        if (v3d->first_vertex != first_vertex) {
+                v3d->first_vertex = first_vertex;
+                v3d->dirty |= V3D_DIRTY_FIRST_VERTEX;
+        }
+
         if (!indirect &&
             !info->primitive_restart &&
             !u_trim_pipe_prim(info->mode, (unsigned*)&draws[0].count))
@@ -1578,14 +1610,40 @@ v3d_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
         v3d_job_add_bo(job, uniforms.bo);
         submit.cfg[6] = uniforms.bo->offset + uniforms.offset;
 
+#ifdef _WIN32
+        BITSET_FOREACH_SET(i, v3d->ssbo[MESA_SHADER_COMPUTE].enabled_mask,
+                           PIPE_MAX_SHADER_BUFFERS) {
+                struct v3d_resource *rsc = v3d_resource(
+                        v3d->ssbo[MESA_SHADER_COMPUTE].sb[i].buffer);
+                v3d_job_add_write_bo(job, rsc->bo);
+        }
+
+        BITSET_FOREACH_SET(i,
+                           v3d->shaderimg[MESA_SHADER_COMPUTE].enabled_mask,
+                           PIPE_MAX_SHADER_IMAGES) {
+                struct v3d_resource *rsc = v3d_resource(
+                        v3d->shaderimg[MESA_SHADER_COMPUTE].si[i].base.resource);
+                v3d_job_add_write_bo(job, rsc->bo);
+        }
+
+        util_dynarray_foreach(&v3d->global_buffers, struct pipe_resource *, res) {
+                if (*res)
+                        v3d_job_add_write_bo(job, v3d_resource(*res)->bo);
+        }
+
+        v3d_job_add_write_bo(job, v3d->compute_shared_memory);
+        v3d_job_prepare_submit(job);
+#endif
+
         /* Pull some job state that was stored in a SUBMIT_CL struct out to
          * our SUBMIT_CSD struct
          */
         submit.bo_handles = job->submit.bo_handles;
         submit.bo_handle_count = job->submit.bo_handle_count;
 
-        /* Serialize this in the rest of our command stream. */
+#ifndef _WIN32
         submit.in_sync = v3d->out_sync;
+#endif
         submit.out_sync = v3d->out_sync;
 
         if (v3d->active_perfmon) {

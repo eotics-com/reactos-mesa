@@ -107,6 +107,13 @@ static bool
 stw_present_region(struct pipe_screen *screen, struct pipe_context *pipe,
                    struct pipe_resource *res, HDC hdc, const RECT *damage)
 {
+   HWND hwnd = WindowFromDC(hdc);
+
+   /* GDI clips a present to an invisible window to nothing, so there is no
+    * destination to copy into and nothing a driver could fail to deliver. */
+   if (hwnd && !IsWindowVisible(hwnd))
+      return true;
+
    if (stw_dev->stw_winsys->present_region)
       return stw_dev->stw_winsys->present_region(screen, pipe, res, hdc, damage);
    stw_dev->stw_winsys->present(screen, pipe, res, hdc);
@@ -804,7 +811,7 @@ stw_framebuffer_present_locked(HDC hdc,
       PRESENTBUFFERSCB data;
 
       memset(&data, 0, sizeof data);
-      data.nVersion = 2;
+      data.nVersion = 3;
       data.syncType = PRESCB_SYNCTYPE_NONE;
       data.luidAdapter = stw_dev->AdapterLuid;
       /* The callback rectangle is window-relative. opengl32 converts it
