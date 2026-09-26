@@ -111,4 +111,8 @@ void APIENTRY DestroyDepthStencilState(D3D10DDI_HDEVICE hDevice,
 void APIENTRY SetDepthStencilState(D3D10DDI_HDEVICE hDevice,
                           D3D10DDI_HDEPTHSTENCILSTATE hState, UINT StencilRef);
 
+struct Device;
+
+bool UpdateFramebufferSize(Device *pDevice);
+
 #endif   /* OUTPUT_MERGER_H */

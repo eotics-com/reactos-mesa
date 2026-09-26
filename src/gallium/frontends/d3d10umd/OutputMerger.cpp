@@ -798,16 +798,42 @@ SetRenderTargets(D3D10DDI_HDEVICE hDevice,                              // IN
       pDevice->fb.zsbuf = *zsbuf;
    }
 
-   /*
-    * Calculate the width/height fields for this framebuffer.  D3D10
-    * actually specifies that they be identical for all bound views.
-    */
-   unsigned width, height;
-   util_framebuffer_min_size(&pDevice->fb, &width, &height);
-   pDevice->fb.width = width;
-   pDevice->fb.height = height;
+   UpdateFramebufferSize(pDevice);
 
    pipe->set_framebuffer_state(pipe, &pDevice->fb);
+}
+
+
+/*
+ * ----------------------------------------------------------------------
+ *
+ * UpdateFramebufferSize --
+ *
+ *    Calculate the width/height fields for the framebuffer.  D3D10
+ *    specifies that they be identical for all bound views.  With no
+ *    views bound, draws still run and rasterize within the viewports,
+ *    and gallium sizes a framebuffer without attachments from these
+ *    fields, which must not be zero.
+ *
+ *    Returns true when the size came from the viewports.
+ *
+ * ----------------------------------------------------------------------
+ */
+
+bool
+UpdateFramebufferSize(Device *pDevice)
+{
+   unsigned width, height;
+
+   if (util_framebuffer_min_size(&pDevice->fb, &width, &height)) {
+      pDevice->fb.width = width;
+      pDevice->fb.height = height;
+      return false;
+   }
+
+   pDevice->fb.width = MAX2(pDevice->viewport_width, 1);
+   pDevice->fb.height = MAX2(pDevice->viewport_height, 1);
+   return true;
 }
 
 

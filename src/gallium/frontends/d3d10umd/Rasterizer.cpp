@@ -32,6 +32,7 @@
 
 
 #include "Rasterizer.h"
+#include "OutputMerger.h"
 #include "State.h"
 
 #include "Debug.h"
@@ -55,8 +56,12 @@ SetViewports(D3D10DDI_HDEVICE hDevice,                                        //
 {
    LOG_ENTRYPOINT();
 
-   struct pipe_context *pipe = CastPipeContext(hDevice);
+   Device *pDevice = CastDevice(hDevice);
+   struct pipe_context *pipe = pDevice->pipe;
    struct pipe_viewport_state states[PIPE_MAX_VIEWPORTS];
+   float max_size = (float)pDevice->screen->caps.max_texture_2d_size;
+   unsigned extent_width = 0;
+   unsigned extent_height = 0;
 
    ASSERT(NumViewports + ClearViewports <=
           D3D10_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE);
@@ -79,6 +84,13 @@ SetViewports(D3D10DDI_HDEVICE hDevice,                                        //
       states[i].translate[0] = half_width + x;
       states[i].translate[1] = half_height + y;
       states[i].translate[2] = z;
+
+      float right = x + width;
+      float bottom = y + height;
+      if (right > 0.0f)
+         extent_width = MAX2(extent_width, (unsigned)ceilf(MIN2(right, max_size)));
+      if (bottom > 0.0f)
+         extent_height = MAX2(extent_height, (unsigned)ceilf(MIN2(bottom, max_size)));
    }
    if (ClearViewports) {
       memset(states + NumViewports, 0,
@@ -86,6 +98,16 @@ SetViewports(D3D10DDI_HDEVICE hDevice,                                        //
    }
    pipe->set_viewport_states(pipe, 0, NumViewports + ClearViewports,
                              states);
+
+   pDevice->viewport_width = extent_width;
+   pDevice->viewport_height = extent_height;
+
+   unsigned fb_width = pDevice->fb.width;
+   unsigned fb_height = pDevice->fb.height;
+   if (UpdateFramebufferSize(pDevice) &&
+       (pDevice->fb.width != fb_width || pDevice->fb.height != fb_height)) {
+      pipe->set_framebuffer_state(pipe, &pDevice->fb);
+   }
 }
 
 

@@ -71,6 +71,9 @@ struct Device
 
    struct cso_context *cso;
    struct pipe_framebuffer_state fb;
+   /* Extent covered by the viewports; sizes a framebuffer with no views. */
+   unsigned viewport_width;
+   unsigned viewport_height;
    struct pipe_vertex_buffer vertex_buffers[PIPE_MAX_ATTRIBS];
    unsigned vertex_strides[PIPE_MAX_ATTRIBS];
    struct pipe_resource *index_buffer;
