@@ -47,11 +47,6 @@ d3d10_create_screen(void *adapter, void *device, const void *callbacks);
 
 static HRESULT APIENTRY CloseAdapter(D3D10DDI_HADAPTER hAdapter);
 
-static unsigned long numAdapters = 0;
-#if 0
-static unsigned long memdbg_no = 0;
-#endif
-
 /*
  * ----------------------------------------------------------------------
  *
@@ -66,16 +61,8 @@ static unsigned long memdbg_no = 0;
 static HRESULT
 OpenAdapterCommon(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
 {
-#if 0
-   if (numAdapters == 0) {
-      memdbg_no = debug_memory_begin();
-   }
-#endif
-   ++numAdapters;
-
    Adapter *pAdaptor = (Adapter *)calloc(sizeof *pAdaptor, 1);
    if (!pAdaptor) {
-      --numAdapters;
       return E_OUTOFMEMORY;
    }
 
@@ -279,12 +266,6 @@ CloseAdapter(D3D10DDI_HADAPTER hAdapter)  // IN
    glsl_type_singleton_decref();
    free(pAdapter);
 
-   --numAdapters;
-#if 0
-   if (numAdapters == 0) {
-      debug_memory_end(memdbg_no);
-   }
-#endif
 
    return S_OK;
 }
