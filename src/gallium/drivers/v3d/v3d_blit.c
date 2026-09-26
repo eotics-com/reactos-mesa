@@ -140,6 +140,27 @@ v3d_render_blit(struct pipe_context *ctx, struct pipe_blit_info *info)
 
         MESA_TRACE_FUNC();
 
+        /* The blitter's viewport spans the whole destination, so an
+         * unscissored blit job loads and stores every tile of it. Bound the
+         * job to the destination box, which is all the blit writes.
+         */
+        if (!info->scissor_enable) {
+                int x0 = MIN2(info->dst.box.x,
+                              info->dst.box.x + info->dst.box.width);
+                int x1 = MAX2(info->dst.box.x,
+                              info->dst.box.x + info->dst.box.width);
+                int y0 = MIN2(info->dst.box.y,
+                              info->dst.box.y + info->dst.box.height);
+                int y1 = MAX2(info->dst.box.y,
+                              info->dst.box.y + info->dst.box.height);
+
+                info->scissor_enable = true;
+                info->scissor.minx = MAX2(x0, 0);
+                info->scissor.miny = MAX2(y0, 0);
+                info->scissor.maxx = MAX2(x1, 0);
+                info->scissor.maxy = MAX2(y1, 0);
+        }
+
         v3d_blitter_save(v3d, info->render_condition_enable ?
                          V3D_BLIT_COND : V3D_BLIT);
         util_blitter_blit(v3d->blitter, info, NULL);
