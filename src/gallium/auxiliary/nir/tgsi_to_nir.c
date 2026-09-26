@@ -1493,6 +1493,12 @@ ttn_sample(struct ttn_compile *c, nir_def **src)
    assert(texture < PIPE_MAX_SHADER_SAMPLER_VIEWS);
 
    switch (tgsi_op) {
+   case TGSI_OPCODE_GATHER4:
+      op = nir_texop_tg4;
+      break;
+   case TGSI_OPCODE_LOD:
+      op = nir_texop_lod;
+      break;
    case TGSI_OPCODE_SAMPLE:
       op = nir_texop_tex;
       break;
@@ -1558,7 +1564,11 @@ ttn_sample(struct ttn_compile *c, nir_def **src)
 
    nir_alu_type sampler_type =
       texture < c->num_samp_types ? c->samp_types[texture] : nir_type_float32;
-   instr->dest_type = sampler_type;
+   instr->dest_type = op == nir_texop_lod ? nir_type_float32 : sampler_type;
+   /* Shader model 4.1 gathers the red channel. The resource swizzle is
+    * applied to the four returned texels, not to the sampled component. */
+   if (op == nir_texop_tg4)
+      instr->component = 0;
 
    nir_variable *texture_var =
       get_texture_var(c, texture, dim, is_array,
@@ -1660,7 +1670,10 @@ ttn_sample(struct ttn_compile *c, nir_def **src)
       tgsi_inst->Src[1].Register.SwizzleZ,
       tgsi_inst->Src[1].Register.SwizzleW,
    };
-   return nir_swizzle(b, &instr->def, swizzle, 4);
+   nir_def *result = &instr->def;
+   if (op == nir_texop_lod)
+      result = nir_pad_vector_imm_int(b, result, 0, 4);
+   return nir_swizzle(b, result, swizzle, 4);
 }
 
 static nir_def *
@@ -2265,6 +2278,8 @@ ttn_emit_instruction(struct ttn_compile *c)
       dst = ttn_tex(c, src);
       break;
 
+   case TGSI_OPCODE_GATHER4:
+   case TGSI_OPCODE_LOD:
    case TGSI_OPCODE_SAMPLE:
    case TGSI_OPCODE_SAMPLE_I:
    case TGSI_OPCODE_SAMPLE_I_MS:

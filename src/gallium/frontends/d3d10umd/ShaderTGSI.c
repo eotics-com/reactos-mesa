@@ -172,8 +172,8 @@ static struct dx10_opcode_xlate opcode_xlate[D3D10_SB_NUM_OPCODES] = {
    {D3D10_SB_OPCODE_DCL_INDEXABLE_TEMP,               OF_FLOAT, TGSI_EXPAND},
    {D3D10_SB_OPCODE_DCL_GLOBAL_FLAGS,                 OF_FLOAT, TGSI_LOG_UNSUPPORTED},
    {D3D10_SB_OPCODE_RESERVED0,                        OF_FLOAT, TGSI_LOG_UNSUPPORTED},
-   {D3D10_1_SB_OPCODE_LOD,                            OF_FLOAT, TGSI_LOG_UNSUPPORTED},
-   {D3D10_1_SB_OPCODE_GATHER4,                        OF_FLOAT, TGSI_LOG_UNSUPPORTED},
+   {D3D10_1_SB_OPCODE_LOD,                            OF_FLOAT, TGSI_EXPAND},
+   {D3D10_1_SB_OPCODE_GATHER4,                        OF_FLOAT, TGSI_EXPAND},
    {D3D10_1_SB_OPCODE_SAMPLE_POS,                     OF_FLOAT, TGSI_LOG_UNSUPPORTED},
    {D3D10_1_SB_OPCODE_SAMPLE_INFO,                    OF_FLOAT, TGSI_LOG_UNSUPPORTED}
 };
@@ -1714,6 +1714,22 @@ Shader_tgsi_translate(const unsigned *code,
             ureg_release_temporary(ureg, r0);
          }
          break;
+
+      case D3D10_1_SB_OPCODE_LOD:
+      case D3D10_1_SB_OPCODE_GATHER4: {
+         struct ureg_src srcreg[3];
+         srcreg[0] = translate_src_operand(&sx, &opcode.src[0], OF_FLOAT);
+         srcreg[1] = translate_src_operand(&sx, &opcode.src[1], OF_UINT);
+         srcreg[2] = translate_src_operand(&sx, &opcode.src[2], OF_UINT);
+         sample_ureg_emit(ureg,
+                          opcode.type == D3D10_1_SB_OPCODE_LOD ?
+                             TGSI_OPCODE_LOD : TGSI_OPCODE_GATHER4,
+                          3, &opcode,
+                          translate_dst_operand(&sx, &opcode.dst[0],
+                                                opcode.saturate),
+                          srcreg);
+         break;
+      }
 
       case D3D10_SB_OPCODE_SAMPLE:
          if (use_legacy_texture_opcodes) {

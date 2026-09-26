@@ -177,8 +177,8 @@ opcode_info[D3D10_SB_NUM_OPCODES] = {
    {_(D3D10_SB_OPCODE_DCL_INDEXABLE_TEMP),               0, 0, OP_DCL},
    {_(D3D10_SB_OPCODE_DCL_GLOBAL_FLAGS),                 0, 0, OP_DCL},
    {_(D3D10_SB_OPCODE_RESERVED0),                        0, 0, OP_NOT_DONE},
-   {_(D3D10_1_SB_OPCODE_LOD),                            0, 0, OP_NOT_DONE},
-   {_(D3D10_1_SB_OPCODE_GATHER4),                        0, 0, OP_NOT_DONE},
+   {_(D3D10_1_SB_OPCODE_LOD),                            1, 3, 0},
+   {_(D3D10_1_SB_OPCODE_GATHER4),                        1, 3, 0},
    {_(D3D10_1_SB_OPCODE_SAMPLE_POS),                     0, 0, OP_NOT_DONE},
    {_(D3D10_1_SB_OPCODE_SAMPLE_INFO),                    0, 0, OP_NOT_DONE}
 };
