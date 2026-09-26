@@ -1021,13 +1021,12 @@ cache_hash(const void *_key, uint32_t key_size)
 {
         const struct v3d_cache_key *key = (struct v3d_cache_key *) _key;
 
-        blake3_hasher ctx;
-        unsigned char blake3[BLAKE3_KEY_LEN];
-        _mesa_blake3_init(&ctx);
-        _mesa_blake3_update(&ctx, key->key, key_size);
-        _mesa_blake3_update(&ctx, key->blake3, BLAKE3_KEY_LEN);
-        _mesa_blake3_final(&ctx, blake3);
-        return _mesa_hash_data(blake3, BLAKE3_KEY_LEN);
+        /* This runs on every variant lookup and only picks a bucket;
+         * cache_compare checks the full key, so a cryptographic hash of
+         * the whole key is not needed here.
+         */
+        uint32_t hash = _mesa_hash_data(key->key, key_size);
+        return _mesa_hash_data_with_seed(key->blake3, BLAKE3_KEY_LEN, hash);
 }
 
 static inline bool
