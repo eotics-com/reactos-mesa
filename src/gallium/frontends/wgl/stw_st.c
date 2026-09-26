@@ -43,6 +43,19 @@
 #include "kopper_interface.h"
 #endif
 
+/* A composited window hands DWM its own back buffers. DWM owns a presented
+ * buffer until it sets the release event: one buffer is on screen, one may
+ * wait to be picked up, one is still being rendered by the GPU, and the
+ * fourth is recorded meanwhile, so the GPU never waits for the CPU. */
+#define STW_SHARED_BUFFERS 4
+
+struct stw_shared_buffer {
+   struct pipe_resource *texture;
+   HANDLE share;
+   HANDLE release;    /* manual reset: set while no compositor frame reads it */
+   HANDLE completion; /* auto reset: set when its presented frame is complete */
+};
+
 struct stw_st_framebuffer {
    struct pipe_frontend_drawable base;
 
@@ -56,6 +69,9 @@ struct stw_st_framebuffer {
    bool needs_fake_front;
    unsigned texture_width, texture_height;
    unsigned texture_mask;
+
+   struct stw_shared_buffer shared[STW_SHARED_BUFFERS];
+   bool shared_checked, shared_enabled;
 };
 
 static uint32_t stwfb_ID = 0;
@@ -128,6 +144,115 @@ stw_pipe_blit(struct pipe_context *pipe,
    pipe->blit(pipe, &blit);
 }
 
+static bool
+stw_st_shared_eligible(const struct stw_st_framebuffer *stwfb)
+{
+   const struct stw_winsys *winsys = stw_dev->stw_winsys;
+
+   if (!winsys->shared_texture_create || !winsys->signal_completion ||
+       !stw_dev->callbacks.pfnPresentBuffers ||
+       (winsys->can_compose && !winsys->can_compose()) ||
+       stwfb->fb->winsys_framebuffer || !stwfb->fb->hWnd ||
+       !(stwfb->pfd_flags & PFD_DOUBLEBUFFER) ||
+       (stwfb->stvis.color_format != PIPE_FORMAT_B8G8R8A8_UNORM &&
+        stwfb->stvis.color_format != PIPE_FORMAT_B8G8R8X8_UNORM))
+      return false;
+#ifdef HAVE_ROS_SHARED_TEXTURE
+   /* DWM's own output presents directly to scanout. */
+   if (GetPropW(stwfb->fb->hWnd, L"ReactOS.Dwm.GpuOutput"))
+      return false;
+#endif
+   return true;
+}
+
+static void
+stw_st_shared_reset(struct stw_st_framebuffer *stwfb)
+{
+   /* DWM keeps its own reference to any buffer it still reads, and win32k
+    * its own reference to the release event. */
+   for (unsigned i = 0; i < STW_SHARED_BUFFERS; i++) {
+      struct stw_shared_buffer *buffer = &stwfb->shared[i];
+
+      pipe_resource_reference(&buffer->texture, NULL);
+      if (buffer->release)
+         CloseHandle(buffer->release);
+      if (buffer->completion)
+         CloseHandle(buffer->completion);
+      memset(buffer, 0, sizeof(*buffer));
+   }
+}
+
+static struct pipe_resource *
+stw_st_shared_create(struct stw_shared_buffer *buffer,
+                     const struct pipe_resource *templ)
+{
+   buffer->texture = stw_dev->stw_winsys->shared_texture_create(
+      stw_dev->screen, templ, &buffer->share);
+   if (buffer->texture) {
+      buffer->release = CreateEventW(NULL, TRUE, TRUE, NULL);
+      buffer->completion = CreateEventW(NULL, FALSE, FALSE, NULL);
+   }
+   if (!buffer->release || !buffer->completion) {
+      pipe_resource_reference(&buffer->texture, NULL);
+      if (buffer->release)
+         CloseHandle(buffer->release);
+      if (buffer->completion)
+         CloseHandle(buffer->completion);
+      memset(buffer, 0, sizeof(*buffer));
+   }
+   return buffer->texture;
+}
+
+/* A buffer no compositor frame reads, other than the excluded ones. */
+static struct pipe_resource *
+stw_st_shared_acquire(struct stw_st_framebuffer *stwfb,
+                      const struct pipe_resource *templ,
+                      const struct pipe_resource *exclude0,
+                      const struct pipe_resource *exclude1)
+{
+   HANDLE events[STW_SHARED_BUFFERS];
+   unsigned slots[STW_SHARED_BUFFERS], count = 0;
+
+   for (unsigned i = 0; i < STW_SHARED_BUFFERS; i++) {
+      struct stw_shared_buffer *buffer = &stwfb->shared[i];
+
+      if (!buffer->texture)
+         return stw_st_shared_create(buffer, templ);
+      if (buffer->texture == exclude0 || buffer->texture == exclude1)
+         continue;
+      if (WaitForSingleObject(buffer->release, 0) == WAIT_OBJECT_0)
+         return buffer->texture;
+      events[count] = buffer->release;
+      slots[count++] = i;
+   }
+   if (!count)
+      return NULL;
+   /* DWM releases a buffer when it takes the next frame, or at once when
+    * a newer frame replaces one it never took. */
+   DWORD result = WaitForMultipleObjects(count, events, FALSE, 5000);
+   if (result >= WAIT_OBJECT_0 + count)
+      return NULL;
+   return stwfb->shared[slots[result - WAIT_OBJECT_0]].texture;
+}
+
+bool
+stw_st_shared_buffer(struct pipe_frontend_drawable *drawable,
+                     struct pipe_resource *resource,
+                     HANDLE *share, HANDLE *release, HANDLE *completion)
+{
+   struct stw_st_framebuffer *stwfb = stw_st_framebuffer(drawable);
+
+   for (unsigned i = 0; resource && i < STW_SHARED_BUFFERS; i++) {
+      if (stwfb->shared[i].texture == resource) {
+         *share = stwfb->shared[i].share;
+         *release = stwfb->shared[i].release;
+         *completion = stwfb->shared[i].completion;
+         return true;
+      }
+   }
+   return false;
+}
+
 #ifdef GALLIUM_ZINK
 
 static_assert(sizeof(struct kopper_vk_surface_create_storage) >= sizeof(VkWin32SurfaceCreateInfoKHR), "");
@@ -184,6 +309,11 @@ stw_st_framebuffer_validate_locked(struct st_context *st,
       (stwfb->pfd_flags & PFD_SWAP_COPY))
       mask |= ST_ATTACHMENT_FRONT_LEFT_MASK;
 
+   if (!stwfb->shared_checked) {
+      stwfb->shared_checked = true;
+      stwfb->shared_enabled = stw_st_shared_eligible(stwfb);
+   }
+
    /* remove outdated textures */
    if (stwfb->texture_width != width || stwfb->texture_height != height) {
       for (i = 0; i < ST_ATTACHMENT_COUNT; i++) {
@@ -191,6 +321,7 @@ stw_st_framebuffer_validate_locked(struct st_context *st,
          pipe_resource_reference(&stwfb->textures[i], NULL);
       }
       pipe_resource_reference(&stwfb->back_texture, NULL);
+      stw_st_shared_reset(stwfb);
 
       if (stwfb->fb->winsys_framebuffer) {
          templ.nr_samples = templ.nr_storage_samples = 1;
@@ -297,9 +428,19 @@ stw_st_framebuffer_validate_locked(struct st_context *st,
             if (stwfb->fb->winsys_framebuffer)
                stwfb->textures[i] = stwfb->fb->winsys_framebuffer->get_resource(
                   stwfb->fb->winsys_framebuffer, i);
-            else
-               stwfb->textures[i] =
-                  stw_dev->screen->resource_create(stw_dev->screen, &templ);
+            else {
+               struct pipe_resource *shared = NULL;
+
+               if (stwfb->shared_enabled && i == ST_ATTACHMENT_BACK_LEFT)
+                  shared = stw_st_shared_acquire(
+                     stwfb, &templ, stwfb->textures[ST_ATTACHMENT_FRONT_LEFT],
+                     NULL);
+               if (shared)
+                  pipe_resource_reference(&stwfb->textures[i], shared);
+               else
+                  stwfb->textures[i] =
+                     stw_dev->screen->resource_create(stw_dev->screen, &templ);
+            }
 #ifdef GALLIUM_ZINK
          }
 #endif
@@ -500,6 +641,28 @@ stw_st_framebuffer_flush_front(struct st_context *st,
    
    enum st_attachment_type flush_statt = statt;
 
+   /* A shared front buffer may already be on screen. Publishing it again
+    * would give DWM two frames of one buffer, so the front moves into a
+    * buffer DWM released, and that one is presented. */
+   struct pipe_resource *front = stwfb->textures[statt];
+   HANDLE share, release, completion;
+   if (!stwfb->fb->winsys_framebuffer &&
+       stw_st_shared_buffer(&stwfb->base, front, &share, &release,
+                            &completion)) {
+      struct pipe_resource *copy = stw_st_shared_acquire(
+         stwfb, front, front, stwfb->textures[ST_ATTACHMENT_BACK_LEFT]);
+
+      if (!copy) {
+         stw_framebuffer_unlock(stwfb->fb);
+         return false;
+      }
+      /* A multisampled front is resolved into the new buffer below. */
+      if (stwfb->stvis.samples <= 1)
+         stw_pipe_blit(pipe, copy, front);
+      pipe_resource_reference(&stwfb->textures[statt], copy);
+      p_atomic_inc(&stwfb->base.stamp);
+   }
+
    /* Resolve the front buffer. */
    if (stwfb->stvis.samples > 1) {
       if (stwfb->fb->winsys_framebuffer)
@@ -579,6 +742,7 @@ stw_st_destroy_framebuffer_locked(struct pipe_frontend_drawable *drawable)
       pipe_resource_reference(&stwfb->textures[i], NULL);
    }
    pipe_resource_reference(&stwfb->back_texture, NULL);
+   stw_st_shared_reset(stwfb);
 
    /* Notify the st manager that the framebuffer interface is no
     * longer valid.
@@ -601,14 +765,30 @@ stw_st_swap_framebuffer_locked(struct st_context *st,
    struct pipe_resource *ptex;
    unsigned mask;
 
+   struct pipe_resource *presented = stwfb->textures[back];
+   HANDLE share, release, completion;
+   bool shared = stw_st_shared_buffer(&stwfb->base, presented,
+                                      &share, &release, &completion);
+
    bool ret = stw_st_framebuffer_present_locked(hdc, &stwfb->base, back, true);
    if (!ret)
       return false;
 
-   /* swap the textures */
-   ptex = stwfb->textures[front];
-   stwfb->textures[front] = stwfb->textures[back];
-   stwfb->textures[back] = ptex;
+   if (shared) {
+      /* The presented buffer becomes the front; DWM may read it until it
+       * takes a newer frame, so the next back buffer is one it released.
+       * Without one, validation allocates a private buffer. */
+      struct pipe_resource *next =
+         stw_st_shared_acquire(stwfb, presented, presented, NULL);
+
+      pipe_resource_reference(&stwfb->textures[front], presented);
+      pipe_resource_reference(&stwfb->textures[back], next);
+   } else {
+      /* swap the textures */
+      ptex = stwfb->textures[front];
+      stwfb->textures[front] = stwfb->textures[back];
+      stwfb->textures[back] = ptex;
+   }
 
    /* swap msaa_textures */
    ptex = stwfb->msaa_textures[front];
@@ -638,10 +818,16 @@ stw_st_swap_framebuffer_locked(struct st_context *st,
 
    /* swap the bits in mask */
    mask = stwfb->texture_mask & ~(front | back);
-   if (stwfb->texture_mask & front)
-      mask |= back;
-   if (stwfb->texture_mask & back)
+   if (shared) {
       mask |= front;
+      if (stwfb->textures[ST_ATTACHMENT_BACK_LEFT])
+         mask |= back;
+   } else {
+      if (stwfb->texture_mask & front)
+         mask |= back;
+      if (stwfb->texture_mask & back)
+         mask |= front;
+   }
    stwfb->texture_mask = mask;
 
    return true;

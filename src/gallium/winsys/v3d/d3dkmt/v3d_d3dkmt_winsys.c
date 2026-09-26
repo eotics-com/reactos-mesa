@@ -35,6 +35,7 @@
 #include "v3d/v3d_screen.h"
 #include "v3d_d3dkmt_public.h"
 #include "dwmpresenttracecore.h"
+#include "rpi5vc4_umd.h"
 
 DPT_BANK v3d_present_trace;
 
@@ -143,6 +144,11 @@ vc4kmt_status vc4kmt_bo_create_resource_private_ex(
    VC4KMT_DEVICE *device, uint32_t size, uint32_t flags,
    void *runtime_resource, const void *resource_private_data,
    uint32_t resource_private_data_size, VC4KMT_BO *bo);
+vc4kmt_status vc4kmt_bo_create_shared(
+   VC4KMT_DEVICE *device, uint32_t size, uint32_t flags,
+   const void *resource_private_data, uint32_t resource_private_data_size,
+   const void *runtime_private_data, uint32_t runtime_private_data_size,
+   VC4KMT_BO *bo, uint32_t *resource, uint32_t *global_share);
 vc4kmt_status vc4kmt_bo_adopt_resource(VC4KMT_DEVICE *device,
                                        uint32_t allocation,
                                        uint32_t size,
@@ -258,6 +264,7 @@ _Static_assert(offsetof(VC4KMT_RESOURCE_OWNER_UPDATE,
 
 #define DWM_DX_SURFACE_INFO_MAGIC         0x53585744u
 #define DWM_DX_SURFACE_INFO_VERSION       1u
+#define DWM_DX_SURFACE_INFO_VERSION_GPU   2u
 #define DWM_DX_FORMAT_B8G8R8A8_UNORM      87u
 
 struct dwm_dx_shared_surface_info {
@@ -282,6 +289,7 @@ struct v3d_d3dkmt_bo {
    struct v3d_d3dkmt_fence_ref *last_writer;
    struct v3d_d3dkmt_fence_ref *last_readers[VC4KMT_ENGINE_COUNT];
    uint32_t shared_resource;
+   uint32_t global_share;
    bool allocated;
    bool cpu_dirty;
    bool cpu_cache_stale;
@@ -315,6 +323,10 @@ struct v3d_d3dkmt_device {
    void *pending_runtime_resource;
    const void *pending_resource_private_data;
    uint32_t pending_resource_private_data_size;
+   /* The next BO created by this thread becomes a D3DKMT shared resource. */
+   DWORD pending_share_thread;
+   const RPI5VC4_RESOURCE_DATA *pending_share_resource;
+   const struct dwm_dx_shared_surface_info *pending_share_info;
 };
 
 static void
@@ -1039,7 +1051,8 @@ v3d_d3dkmt_runtime_resource_pending(int fd)
    if (!device)
       return false;
    v3d_d3dkmt_lock(device);
-   pending = device->pending_runtime_resource != NULL;
+   pending = device->pending_runtime_resource != NULL ||
+             device->pending_share_thread == GetCurrentThreadId();
    mtx_unlock(&device->lock);
    return pending;
 }
@@ -1159,6 +1172,87 @@ v3d_d3dkmt_resource_allocation(struct pipe_screen *screen,
       allocation = bo->kmt.allocation;
    mtx_unlock(&device->lock);
    return allocation;
+}
+
+/* A single-sampled BGRA render target that DWM can open by its global
+ * share and sample in place. The description travels with the resource:
+ * DWM's D3D driver reads the tiling from RPI5VC4_RESOURCE_DATA. */
+struct pipe_resource *
+v3d_d3dkmt_create_shared_texture(struct pipe_screen *screen,
+                                 const struct pipe_resource *templ,
+                                 uint32_t *global_share)
+{
+   struct v3d_d3dkmt_device *device;
+   struct pipe_resource *resource;
+   struct v3d_resource *rsc;
+   struct v3d_d3dkmt_bo *bo;
+   RPI5VC4_RESOURCE_DATA data;
+   struct dwm_dx_shared_surface_info info;
+   bool claimed = false;
+
+   if (global_share)
+      *global_share = 0;
+   if (!screen || !templ || !global_share ||
+       templ->target != PIPE_TEXTURE_2D ||
+       (templ->format != PIPE_FORMAT_B8G8R8A8_UNORM &&
+        templ->format != PIPE_FORMAT_B8G8R8X8_UNORM) ||
+       templ->last_level || templ->array_size != 1 || templ->depth0 != 1 ||
+       templ->nr_samples > 1 || !templ->width0 || !templ->height0 ||
+       (templ->bind & (PIPE_BIND_LINEAR | PIPE_BIND_SCANOUT |
+                       PIPE_BIND_CURSOR)))
+      return NULL;
+   device = v3d_d3dkmt_device_lookup(v3d_screen(screen)->fd);
+   if (!device)
+      return NULL;
+
+   memset(&data, 0, sizeof(data));
+   data.Magic = RPI5VC4_RESOURCE_DATA_MAGIC;
+   data.Version = RPI5VC4_RESOURCE_DATA_VERSION;
+   data.Dimension = RPI5VC4_RESOURCE_DIMENSION_TEXTURE2D;
+   data.Format = RPI5VC4_RESOURCE_DXGI_FORMAT_B8G8R8A8_UNORM;
+   data.BindFlags = RPI5VC4_RESOURCE_BIND_SHADER_RESOURCE |
+                    RPI5VC4_RESOURCE_BIND_RENDER_TARGET;
+   data.MiscFlags = 0x2; /* D3D10_DDI_RESOURCE_MISC_SHARED */
+   data.Width = templ->width0;
+   data.Height = templ->height0;
+   data.Depth = data.ArraySize = data.MipLevels = data.SampleCount = 1;
+   data.Layout = RPI5VC4_RESOURCE_LAYOUT_V3D_UIF;
+   data.PrimaryVidPnSourceId = RPI5VC4_RESOURCE_INVALID_VIDPN_SOURCE;
+
+   memset(&info, 0, sizeof(info));
+   info.magic = DWM_DX_SURFACE_INFO_MAGIC;
+   info.version = DWM_DX_SURFACE_INFO_VERSION_GPU;
+   info.width = templ->width0;
+   info.height = templ->height0;
+   info.format = DWM_DX_FORMAT_B8G8R8A8_UNORM;
+
+   v3d_d3dkmt_lock(device);
+   if (!device->pending_share_thread && !device->pending_runtime_resource) {
+      device->pending_share_thread = GetCurrentThreadId();
+      device->pending_share_resource = &data;
+      device->pending_share_info = &info;
+      claimed = true;
+   }
+   mtx_unlock(&device->lock);
+   if (!claimed)
+      return NULL;
+
+   resource = screen->resource_create(screen, templ);
+
+   v3d_d3dkmt_lock(device);
+   device->pending_share_thread = 0;
+   device->pending_share_resource = NULL;
+   device->pending_share_info = NULL;
+   rsc = resource ? v3d_resource(resource) : NULL;
+   bo = rsc && rsc->tiled && rsc->bo ?
+      v3d_d3dkmt_bo_lookup_locked(device, rsc->bo->handle) : NULL;
+   if (bo)
+      *global_share = bo->global_share;
+   mtx_unlock(&device->lock);
+
+   if (!*global_share)
+      pipe_resource_reference(&resource, NULL);
+   return resource;
 }
 
 bool
@@ -1949,12 +2043,24 @@ v3d_d3dkmt_ioctl_impl(int fd, unsigned long request, void *arg)
       bo = &device->bos[handle];
       memset(bo, 0, sizeof(*bo));
       DPT_SCOPE trace = DptBegin(&v3d_present_trace, DPT_BO_CREATE);
-      vc4kmt_status status = vc4kmt_bo_create_resource_private_ex(
-         device->kmt, create->size, flags,
-         device->pending_runtime_resource,
-         device->pending_resource_private_data,
-         device->pending_resource_private_data_size,
-         &bo->kmt);
+      vc4kmt_status status;
+      if (device->pending_share_thread == GetCurrentThreadId()) {
+         device->pending_share_thread = 0;
+         status = vc4kmt_bo_create_shared(
+            device->kmt, create->size, flags,
+            device->pending_share_resource,
+            sizeof(*device->pending_share_resource),
+            device->pending_share_info,
+            sizeof(*device->pending_share_info),
+            &bo->kmt, &bo->shared_resource, &bo->global_share);
+      } else {
+         status = vc4kmt_bo_create_resource_private_ex(
+            device->kmt, create->size, flags,
+            device->pending_runtime_resource,
+            device->pending_resource_private_data,
+            device->pending_resource_private_data_size,
+            &bo->kmt);
+      }
       DptEnd(&v3d_present_trace, trace, status >= 0, create->size);
       if (status < 0) {
          errno = ENOMEM;

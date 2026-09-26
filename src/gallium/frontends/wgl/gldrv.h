@@ -528,6 +528,22 @@ typedef struct _PRESENTBUFFERS2 {
 } PRESENTBUFFERS2, *LPPRESENTBUFFERS2;
 typedef BOOL (APIENTRY *PFN_PRESENTBUFFERS)(HDC hdc, LPPRESENTBUFFERSCB pprsbcbData);
 
+/* ReactOS: version 4 of the present callback hands the compositor the ICD's
+ * own buffer. The ICD resets hReleaseEvent before the call; it is set again
+ * once no compositor frame reads the buffer, including when the buffer is
+ * not published. hCompletionEvent is set when the buffer's GPU writes are
+ * complete. pPrivData still describes the buffer for a direct present. */
+#define PRESENTBUFFERSCB_RETAINED_VERSION 4
+
+typedef struct _PRESENTBUFFERSCB_RETAINED {
+    PRESENTBUFFERSCB Base;
+    IN HANDLE hSharedSurface;   /* D3DKMT global share, B8G8R8A8 */
+    IN UINT uWidth;
+    IN UINT uHeight;
+    IN HANDLE hReleaseEvent;
+    IN HANDLE hCompletionEvent;
+} PRESENTBUFFERSCB_RETAINED, *LPPRESENTBUFFERSCB_RETAINED;
+
 #define PRESCB_SYNCTYPE_NONE 0
 #define PRESCB_SYNCTYPE_VSYNC  1
 

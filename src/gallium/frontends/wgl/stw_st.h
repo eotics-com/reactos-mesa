@@ -57,4 +57,9 @@ struct pipe_resource *
 stw_get_framebuffer_resource(struct pipe_frontend_drawable *drawable,
                              enum st_attachment_type att);
 
+bool
+stw_st_shared_buffer(struct pipe_frontend_drawable *drawable,
+                     struct pipe_resource *resource,
+                     HANDLE *share, HANDLE *release, HANDLE *completion);
+
 #endif /* STW_ST_H */

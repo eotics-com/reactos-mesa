@@ -151,6 +151,18 @@ struct stw_winsys
 
    /* A combined ICD may select a screen without shared-surface support. */
    bool (*can_compose)(void);
+
+   /* Optional: a render target another process can open by its D3DKMT
+    * global share, so a window can hand DWM its own back buffers. */
+   struct pipe_resource *
+   (*shared_texture_create)(struct pipe_screen *screen,
+                            const struct pipe_resource *templ,
+                            HANDLE *share);
+
+   /* Optional: flush the context and set event once its work completes. */
+   bool (*signal_completion)(struct pipe_screen *screen,
+                             struct pipe_context *context,
+                             HANDLE event);
 };
 
 bool

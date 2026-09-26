@@ -804,6 +804,48 @@ stw_framebuffer_present_locked(HDC hdc,
 
       return result;
    }
+   HANDLE share, release, completion;
+   struct stw_context *present_ctx = stw_current_context();
+   if (stw_dev->callbacks.pfnPresentBuffers &&
+       stw_st_shared_buffer(fb->drawable, res, &share, &release, &completion) &&
+       present_ctx) {
+      PRESENTBUFFERSCB_RETAINED data;
+
+      /* The buffer is DWM's from here until it lets it go. The kernel sets
+       * the completion event once the frame's rendering is done. */
+      ResetEvent(release);
+      ResetEvent(completion);
+      if (!stw_dev->stw_winsys->signal_completion(stw_dev->screen,
+                                                  present_ctx->st->pipe,
+                                                  completion)) {
+         SetEvent(release);
+         stw_framebuffer_update(fb);
+         stw_notify_current_locked(fb);
+         stw_framebuffer_unlock(fb);
+         return false;
+      }
+
+      memset(&data, 0, sizeof data);
+      data.Base.nVersion = PRESENTBUFFERSCB_RETAINED_VERSION;
+      data.Base.syncType = PRESCB_SYNCTYPE_NONE;
+      data.Base.luidAdapter = stw_dev->AdapterLuid;
+      data.Base.updateRect = fb->client_rect;
+      data.Base.pPrivData = &present;
+      data.hSharedSurface = share;
+      data.uWidth = res->width0;
+      data.uHeight = res->height0;
+      data.hReleaseEvent = release;
+      data.hCompletionEvent = completion;
+
+      stw_framebuffer_update(fb);
+      stw_notify_current_locked(fb);
+      stw_framebuffer_unlock(fb);
+
+      STW_TRACE_BEGIN(trace, DPT_WGL_CALLBACK);
+      BOOL result = stw_dev->callbacks.pfnPresentBuffers(hdc, &data.Base);
+      STW_TRACE_END(trace, result);
+      return result;
+   }
    else if (stw_dev->callbacks.pfnPresentBuffers &&
             stw_dev->stw_winsys->compose &&
             (!stw_dev->stw_winsys->can_compose ||

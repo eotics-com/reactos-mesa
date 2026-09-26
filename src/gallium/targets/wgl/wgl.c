@@ -469,6 +469,42 @@ wgl_compose(struct pipe_screen *screen,
 }
 #endif
 
+#ifdef GALLIUM_V3D
+static struct pipe_resource *
+wgl_shared_texture_create(struct pipe_screen *screen,
+                          const struct pipe_resource *templ,
+                          HANDLE *share)
+{
+   struct pipe_resource *resource;
+   uint32_t global_share = 0;
+
+   *share = NULL;
+   if (!use_v3d)
+      return NULL;
+   resource = v3d_d3dkmt_create_shared_texture(screen, templ, &global_share);
+   *share = (HANDLE)(uintptr_t)global_share;
+   return resource;
+}
+
+static bool
+wgl_signal_completion(struct pipe_screen *screen,
+                      struct pipe_context *context,
+                      HANDLE event)
+{
+   struct pipe_fence_handle *fence = NULL;
+   bool complete;
+
+   if (!use_v3d || !context || !event)
+      return false;
+   context->flush(context, &fence, 0);
+   if (!fence)
+      return false;
+   complete = v3d_d3dkmt_fence_signal_event(screen, fence, event);
+   screen->fence_reference(screen, &fence, NULL);
+   return complete;
+}
+#endif
+
 static bool
 wgl_present_region(struct pipe_screen *screen, struct pipe_context *ctx,
                    struct pipe_resource *res, HDC hdc, const RECT *damage)
@@ -529,6 +565,13 @@ static struct stw_winsys stw_winsys = {
    NULL,
    &wgl_present_region,
    &wgl_can_compose,
+#ifdef GALLIUM_V3D
+   &wgl_shared_texture_create,
+   &wgl_signal_completion,
+#else
+   NULL, /* shared_texture_create */
+   NULL, /* signal_completion */
+#endif
 };
 
 

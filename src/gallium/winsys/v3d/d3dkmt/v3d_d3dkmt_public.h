@@ -51,6 +51,11 @@ uint32_t
 v3d_d3dkmt_resource_allocation(struct pipe_screen *screen,
                                struct pipe_resource *resource);
 
+struct pipe_resource *
+v3d_d3dkmt_create_shared_texture(struct pipe_screen *screen,
+                                 const struct pipe_resource *templ,
+                                 uint32_t *global_share);
+
 bool
 v3d_d3dkmt_rebind_runtime_resources(
    struct pipe_screen *screen,
