@@ -216,6 +216,23 @@ get_tf_shader(struct v3d_context *v3d)
                 return v3d->prog.bind_vs;
 }
 
+/* A scissor inside one the job already recorded adds no supertiles to the
+ * render, so it need not spend one of the job's scissor slots.
+ */
+static bool
+job_scissor_covered(const struct v3d_job *job,
+                    const struct pipe_scissor_state *scissor)
+{
+        for (uint32_t i = 0; i < job->scissor.count; i++) {
+                if (job->scissor.rects[i].min_x <= scissor->minx &&
+                    job->scissor.rects[i].min_y <= scissor->miny &&
+                    job->scissor.rects[i].max_x >= scissor->maxx - 1 &&
+                    job->scissor.rects[i].max_y >= scissor->maxy - 1)
+                        return true;
+        }
+        return false;
+}
+
 void
 v3dX(emit_state)(struct pipe_context *pctx)
 {
@@ -273,7 +290,8 @@ v3dX(emit_state)(struct pipe_context *pctx)
                 if (!v3d->rasterizer->base.scissor) {
                     job->scissor.disabled = true;
                 } else if (!job->scissor.disabled &&
-                           (v3d->dirty & V3D_DIRTY_SCISSOR)) {
+                           (v3d->dirty & V3D_DIRTY_SCISSOR) &&
+                           !job_scissor_covered(job, &v3d->scissor)) {
                         if (job->scissor.count < V3D_JOB_MAX_SCISSORS) {
                                 job->scissor.rects[job->scissor.count].min_x =
                                         v3d->scissor.minx;
