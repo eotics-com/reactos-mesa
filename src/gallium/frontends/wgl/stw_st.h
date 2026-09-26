@@ -62,4 +62,10 @@ stw_st_shared_buffer(struct pipe_frontend_drawable *drawable,
                      struct pipe_resource *resource,
                      HANDLE *share, HANDLE *release, HANDLE *completion);
 
+bool
+stw_st_shared_buffer_scanout(struct pipe_frontend_drawable *drawable,
+                             struct pipe_resource *resource,
+                             HANDLE *share, HANDLE *release,
+                             HANDLE *completion, bool *scanout);
+
 #endif /* STW_ST_H */

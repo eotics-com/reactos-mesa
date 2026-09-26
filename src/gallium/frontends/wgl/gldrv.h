@@ -542,7 +542,11 @@ typedef struct _PRESENTBUFFERSCB_RETAINED {
     IN UINT uHeight;
     IN HANDLE hReleaseEvent;
     IN HANDLE hCompletionEvent;
+    IN UINT uFlags;             /* PRESENTBUFFERSCB_SCANOUT */
 } PRESENTBUFFERSCB_RETAINED, *LPPRESENTBUFFERSCB_RETAINED;
+
+/* The buffer is linear in memory the display can scan out as a plane. */
+#define PRESENTBUFFERSCB_SCANOUT 0x00000001u
 
 #define PRESCB_SYNCTYPE_NONE 0
 #define PRESCB_SYNCTYPE_VSYNC  1

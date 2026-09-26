@@ -153,10 +153,12 @@ struct stw_winsys
    bool (*can_compose)(void);
 
    /* Optional: a render target another process can open by its D3DKMT
-    * global share, so a window can hand DWM its own back buffers. */
+    * global share, so a window can hand DWM its own back buffers. A scanout
+    * one can also be shown by the display controller as an overlay plane. */
    struct pipe_resource *
    (*shared_texture_create)(struct pipe_screen *screen,
                             const struct pipe_resource *templ,
+                            bool scanout,
                             HANDLE *share);
 
    /* Optional: flush the context and set event once its work completes. */

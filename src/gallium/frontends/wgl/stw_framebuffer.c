@@ -805,9 +805,11 @@ stw_framebuffer_present_locked(HDC hdc,
       return result;
    }
    HANDLE share, release, completion;
+   bool scanout = false;
    struct stw_context *present_ctx = stw_current_context();
    if (stw_dev->callbacks.pfnPresentBuffers &&
-       stw_st_shared_buffer(fb->drawable, res, &share, &release, &completion) &&
+       stw_st_shared_buffer_scanout(fb->drawable, res, &share, &release,
+                                    &completion, &scanout) &&
        present_ctx) {
       PRESENTBUFFERSCB_RETAINED data;
 
@@ -836,6 +838,7 @@ stw_framebuffer_present_locked(HDC hdc,
       data.uHeight = res->height0;
       data.hReleaseEvent = release;
       data.hCompletionEvent = completion;
+      data.uFlags = scanout ? PRESENTBUFFERSCB_SCANOUT : 0;
 
       stw_framebuffer_update(fb);
       stw_notify_current_locked(fb);

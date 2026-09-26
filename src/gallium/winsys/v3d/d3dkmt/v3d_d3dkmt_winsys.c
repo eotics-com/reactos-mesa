@@ -1176,12 +1176,16 @@ v3d_d3dkmt_resource_allocation(struct pipe_screen *screen,
 
 /* A single-sampled BGRA render target that DWM can open by its global
  * share and sample in place. The description travels with the resource:
- * DWM's D3D driver reads the tiling from RPI5VC4_RESOURCE_DATA. */
+ * DWM's D3D driver reads the tiling from RPI5VC4_RESOURCE_DATA. A scanout
+ * texture is linear in contiguous memory, so the display controller can
+ * also show it as an overlay plane. */
 struct pipe_resource *
 v3d_d3dkmt_create_shared_texture(struct pipe_screen *screen,
                                  const struct pipe_resource *templ,
+                                 bool scanout,
                                  uint32_t *global_share)
 {
+   struct pipe_resource layout;
    struct v3d_d3dkmt_device *device;
    struct pipe_resource *resource;
    struct v3d_resource *rsc;
@@ -1218,6 +1222,14 @@ v3d_d3dkmt_create_shared_texture(struct pipe_screen *screen,
    data.Depth = data.ArraySize = data.MipLevels = data.SampleCount = 1;
    data.Layout = RPI5VC4_RESOURCE_LAYOUT_V3D_UIF;
    data.PrimaryVidPnSourceId = RPI5VC4_RESOURCE_INVALID_VIDPN_SOURCE;
+   layout = *templ;
+   if (scanout) {
+      /* v3d aligns a raster render target's rows to 64 bytes. */
+      layout.bind |= PIPE_BIND_SCANOUT;
+      data.Layout = RPI5VC4_RESOURCE_LAYOUT_LINEAR;
+      data.Flags = RPI5VC4_RESOURCE_FLAG_SCANOUT;
+      data.Stride = align(templ->width0, 16) * 4;
+   }
 
    memset(&info, 0, sizeof(info));
    info.magic = DWM_DX_SURFACE_INFO_MAGIC;
@@ -1237,14 +1249,16 @@ v3d_d3dkmt_create_shared_texture(struct pipe_screen *screen,
    if (!claimed)
       return NULL;
 
-   resource = screen->resource_create(screen, templ);
+   resource = screen->resource_create(screen, &layout);
 
    v3d_d3dkmt_lock(device);
    device->pending_share_thread = 0;
    device->pending_share_resource = NULL;
    device->pending_share_info = NULL;
    rsc = resource ? v3d_resource(resource) : NULL;
-   bo = rsc && rsc->tiled && rsc->bo ?
+   /* The resource must have the layout its description promises. */
+   bo = rsc && rsc->bo && rsc->tiled == !scanout &&
+        (!scanout || rsc->slices[0].stride == data.Stride) ?
       v3d_d3dkmt_bo_lookup_locked(device, rsc->bo->handle) : NULL;
    if (bo)
       *global_share = bo->global_share;

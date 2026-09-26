@@ -46,11 +46,14 @@
 /* A composited window hands DWM its own back buffers. DWM owns a presented
  * buffer until it sets the release event: one buffer is on screen, one may
  * wait to be picked up, one is still being rendered by the GPU, and the
- * fourth is recorded meanwhile, so the GPU never waits for the CPU. */
-#define STW_SHARED_BUFFERS 4
+ * fourth is recorded meanwhile, so the GPU never waits for the CPU. An
+ * overlay plane also keeps the buffer queued for the next flip, which takes
+ * a fifth. Buffers are created only when all others are in use. */
+#define STW_SHARED_BUFFERS 5
 
 struct stw_shared_buffer {
    struct pipe_resource *texture;
+   bool scanout;
    HANDLE share;
    HANDLE release;    /* manual reset: set while no compositor frame reads it */
    HANDLE completion; /* auto reset: set when its presented frame is complete */
@@ -186,8 +189,14 @@ static struct pipe_resource *
 stw_st_shared_create(struct stw_shared_buffer *buffer,
                      const struct pipe_resource *templ)
 {
+   /* Prefer a buffer the display controller can show directly; contiguous
+    * memory for those is limited. */
    buffer->texture = stw_dev->stw_winsys->shared_texture_create(
-      stw_dev->screen, templ, &buffer->share);
+      stw_dev->screen, templ, true, &buffer->share);
+   buffer->scanout = buffer->texture != NULL;
+   if (!buffer->texture)
+      buffer->texture = stw_dev->stw_winsys->shared_texture_create(
+         stw_dev->screen, templ, false, &buffer->share);
    if (buffer->texture) {
       buffer->release = CreateEventW(NULL, TRUE, TRUE, NULL);
       buffer->completion = CreateEventW(NULL, FALSE, FALSE, NULL);
@@ -240,6 +249,16 @@ stw_st_shared_buffer(struct pipe_frontend_drawable *drawable,
                      struct pipe_resource *resource,
                      HANDLE *share, HANDLE *release, HANDLE *completion)
 {
+   return stw_st_shared_buffer_scanout(drawable, resource, share, release,
+                                       completion, NULL);
+}
+
+bool
+stw_st_shared_buffer_scanout(struct pipe_frontend_drawable *drawable,
+                             struct pipe_resource *resource,
+                             HANDLE *share, HANDLE *release,
+                             HANDLE *completion, bool *scanout)
+{
    struct stw_st_framebuffer *stwfb = stw_st_framebuffer(drawable);
 
    for (unsigned i = 0; resource && i < STW_SHARED_BUFFERS; i++) {
@@ -247,6 +266,8 @@ stw_st_shared_buffer(struct pipe_frontend_drawable *drawable,
          *share = stwfb->shared[i].share;
          *release = stwfb->shared[i].release;
          *completion = stwfb->shared[i].completion;
+         if (scanout)
+            *scanout = stwfb->shared[i].scanout;
          return true;
       }
    }

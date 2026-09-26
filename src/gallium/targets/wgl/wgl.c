@@ -473,6 +473,7 @@ wgl_compose(struct pipe_screen *screen,
 static struct pipe_resource *
 wgl_shared_texture_create(struct pipe_screen *screen,
                           const struct pipe_resource *templ,
+                          bool scanout,
                           HANDLE *share)
 {
    struct pipe_resource *resource;
@@ -481,7 +482,8 @@ wgl_shared_texture_create(struct pipe_screen *screen,
    *share = NULL;
    if (!use_v3d)
       return NULL;
-   resource = v3d_d3dkmt_create_shared_texture(screen, templ, &global_share);
+   resource = v3d_d3dkmt_create_shared_texture(screen, templ, scanout,
+                                               &global_share);
    *share = (HANDLE)(uintptr_t)global_share;
    return resource;
 }
