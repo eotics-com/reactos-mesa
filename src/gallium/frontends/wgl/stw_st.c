@@ -189,14 +189,19 @@ static struct pipe_resource *
 stw_st_shared_create(struct stw_shared_buffer *buffer,
                      const struct pipe_resource *templ)
 {
+   /* The template may be the presented buffer, whose binds carry its own
+    * layout; the winsys chooses each buffer's layout. */
+   struct pipe_resource layout = *templ;
+   layout.bind &= ~(PIPE_BIND_SCANOUT | PIPE_BIND_LINEAR);
+
    /* Prefer a buffer the display controller can show directly; contiguous
     * memory for those is limited. */
    buffer->texture = stw_dev->stw_winsys->shared_texture_create(
-      stw_dev->screen, templ, true, &buffer->share);
+      stw_dev->screen, &layout, true, &buffer->share);
    buffer->scanout = buffer->texture != NULL;
    if (!buffer->texture)
       buffer->texture = stw_dev->stw_winsys->shared_texture_create(
-         stw_dev->screen, templ, false, &buffer->share);
+         stw_dev->screen, &layout, false, &buffer->share);
    if (buffer->texture) {
       buffer->release = CreateEventW(NULL, TRUE, TRUE, NULL);
       buffer->completion = CreateEventW(NULL, FALSE, FALSE, NULL);
