@@ -34,6 +34,10 @@ function(mesa_target_defaults target)
     endforeach()
     if(MESA_ASSERTIONS)
         target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:-UNDEBUG>")
+        # Failed assertions report to the debugger; see cmake/assert/assert.h.
+        target_include_directories(${target} BEFORE PRIVATE
+            "${PROJECT_SOURCE_DIR}/cmake/assert")
+        target_link_libraries(${target} PRIVATE mesa_assert_report)
     else()
         target_compile_definitions(${target} PRIVATE NDEBUG)
     endif()
