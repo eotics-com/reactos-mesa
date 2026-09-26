@@ -704,9 +704,14 @@ SetRenderTargets11(
    const UINT *pUAVInitialCounts,
    UINT UAVStartSlot, UINT NumUAVs, UINT UAVRangeStart, UINT UAVRangeSize)
 {
-   if (NumUAVs || UAVRangeSize) {
-      SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
-      return;
+   /* The runtime passes the UAV slots after the render targets on every
+    * call, with NULL handles for unbound slots.  Only an actual UAV binding
+    * needs output-merger UAV support. */
+   for (UINT i = 0; i < NumUAVs; ++i) {
+      if (phUnorderedAccessView && phUnorderedAccessView[i].pDrvPrivate) {
+         SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
+         return;
+      }
    }
 
    SetRenderTargets(hDevice, phRenderTargetView, RTargets, ClearTargets,
