@@ -417,6 +417,15 @@ v3d_init_screen_caps(struct v3d_screen *screen)
          * again after submission without another ownership transition.
          */
         caps->buffer_map_persistent_coherent = false;
+
+        /* The TMU filters cube maps across faces unconditionally, so
+         * enabling GL_TEXTURE_CUBE_MAP_SEAMLESS is always honoured.  The
+         * non-seamless default was never available, not even in the 3.1
+         * contexts.  Without this extension Mesa caps the core profile at
+         * 3.1, and Windows applications asking for a 3.2+ core context
+         * fail to start.
+         */
+        caps->seamless_cube_map = true;
 #endif
 
         /* Supported features (boolean caps). */
