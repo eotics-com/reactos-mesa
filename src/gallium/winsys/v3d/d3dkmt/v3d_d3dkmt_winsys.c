@@ -1842,9 +1842,13 @@ v3d_d3dkmt_get_param(struct v3d_d3dkmt_device *device,
    case DRM_V3D_PARAM_SUPPORTS_CACHE_FLUSH:
       param->value = !!(device->info->caps & VC4KMT_CAP_CACHE_FLUSH);
       return 0;
-   case DRM_V3D_PARAM_SUPPORTS_PERFMON:
    case DRM_V3D_PARAM_SUPPORTS_MULTISYNC_EXT:
    case DRM_V3D_PARAM_SUPPORTS_CPU_QUEUE:
+      /* SUBMIT_CPU accepts the timestamp query job with its multisync
+       * extension, which is what gallium v3d uses for timer queries. */
+      param->value = 1;
+      return 0;
+   case DRM_V3D_PARAM_SUPPORTS_PERFMON:
    case DRM_V3D_PARAM_SUPPORTS_SUPER_PAGES:
    case DRM_V3D_PARAM_MAX_PERF_COUNTERS:
       param->value = 0;
@@ -2021,6 +2025,154 @@ v3d_d3dkmt_submit_csd_locked(struct v3d_d3dkmt_device *device,
    return result;
 }
 
+static void
+v3d_d3dkmt_signal_syncobj_locked(struct v3d_d3dkmt_device *device,
+                                 struct v3d_d3dkmt_syncobj *syncobj)
+{
+   for (uint32_t engine = 0; engine < VC4KMT_ENGINE_COUNT; engine++)
+      v3d_d3dkmt_fence_release_locked(device, &syncobj->fences[engine]);
+   syncobj->signaled = true;
+}
+
+/* The kernel runs a CPU job once its wait semaphores and the pending work on
+ * its BO complete.  The timestamp query is the only CPU job gallium v3d
+ * submits, so it is completed here: waiting first orders the stamp after the
+ * GPU work the query covers.
+ */
+static int
+v3d_d3dkmt_submit_cpu_locked(struct v3d_d3dkmt_device *device,
+                             const struct drm_v3d_submit_cpu *submit)
+{
+   const uint32_t *bo_handles = (const uint32_t *)(uintptr_t)submit->bo_handles;
+   const struct drm_v3d_multi_sync *multisync = NULL;
+   const struct drm_v3d_timestamp_query *timestamp = NULL;
+   const struct drm_v3d_sem *in_syncs = NULL;
+   const struct drm_v3d_sem *out_syncs = NULL;
+   uint32_t in_sync_count = 0;
+   uint32_t out_sync_count = 0;
+   const uint32_t *offsets;
+   const uint32_t *query_syncs;
+   struct v3d_d3dkmt_bo *bo;
+   void *map;
+   uint64_t now;
+
+   if (submit->flags != DRM_V3D_SUBMIT_EXTENSION) {
+      errno = EINVAL;
+      return -1;
+   }
+
+   for (const struct drm_v3d_extension *ext =
+           (const struct drm_v3d_extension *)(uintptr_t)submit->extensions;
+        ext; ext = (const struct drm_v3d_extension *)(uintptr_t)ext->next) {
+      if (ext->flags) {
+         errno = EINVAL;
+         return -1;
+      }
+      switch (ext->id) {
+      case DRM_V3D_EXT_ID_MULTI_SYNC:
+         if (multisync) {
+            errno = EINVAL;
+            return -1;
+         }
+         multisync = (const struct drm_v3d_multi_sync *)ext;
+         break;
+      case DRM_V3D_EXT_ID_CPU_TIMESTAMP_QUERY:
+         if (timestamp) {
+            errno = EINVAL;
+            return -1;
+         }
+         timestamp = (const struct drm_v3d_timestamp_query *)ext;
+         break;
+      default:
+         errno = EOPNOTSUPP;
+         return -1;
+      }
+   }
+
+   if (!timestamp || submit->bo_handle_count != 1 || !bo_handles) {
+      errno = EINVAL;
+      return -1;
+   }
+   bo = v3d_d3dkmt_bo_lookup_locked(device,
+                                    v3d_d3dkmt_submit_handle(bo_handles[0]));
+   offsets = (const uint32_t *)(uintptr_t)timestamp->offsets;
+   query_syncs = (const uint32_t *)(uintptr_t)timestamp->syncs;
+   if (!bo || bo->kmt.size < sizeof(now) ||
+       (timestamp->count && (!offsets || !query_syncs))) {
+      errno = EINVAL;
+      return -1;
+   }
+   for (uint32_t i = 0; i < timestamp->count; i++) {
+      if (offsets[i] > bo->kmt.size - sizeof(now) ||
+          !v3d_d3dkmt_syncobj_lookup_locked(device, query_syncs[i])) {
+         errno = EINVAL;
+         return -1;
+      }
+   }
+
+   if (multisync) {
+      in_syncs = (const struct drm_v3d_sem *)(uintptr_t)multisync->in_syncs;
+      out_syncs = (const struct drm_v3d_sem *)(uintptr_t)multisync->out_syncs;
+      in_sync_count = multisync->in_sync_count;
+      out_sync_count = multisync->out_sync_count;
+      if ((in_sync_count && !in_syncs) || (out_sync_count && !out_syncs)) {
+         errno = EINVAL;
+         return -1;
+      }
+   }
+   for (uint32_t i = 0; i < out_sync_count; i++) {
+      if (!v3d_d3dkmt_syncobj_lookup_locked(device, out_syncs[i].handle)) {
+         errno = EINVAL;
+         return -1;
+      }
+   }
+
+   for (uint32_t i = 0; i < in_sync_count; i++) {
+      int result = v3d_d3dkmt_wait_syncobj_locked(device, in_syncs[i].handle,
+                                                  V3D_D3DKMT_INFINITE_MS);
+
+      if (result) {
+         /* The kernel rejects a wait semaphore that has no fence. */
+         if (result == -ETIME)
+            errno = EINVAL;
+         return -1;
+      }
+   }
+   if (v3d_d3dkmt_wait_bo_idle_locked(device, bo, V3D_D3DKMT_INFINITE_MS))
+      return -1;
+
+   if (bo->cpu_cache_stale) {
+      if (vc4kmt_bo_invalidate(device->kmt, &bo->kmt, 0, bo->kmt.size) < 0) {
+         errno = EIO;
+         return -1;
+      }
+      bo->cpu_cache_stale = false;
+   }
+   if (vc4kmt_bo_map(device->kmt, &bo->kmt, &map) < 0) {
+      errno = EIO;
+      return -1;
+   }
+
+   /* Only the first query of a multiview batch records the time. */
+   now = os_time_get_nano();
+   for (uint32_t i = 0; i < timestamp->count; i++) {
+      const uint64_t value = i == 0 ? now : 0;
+
+      memcpy((uint8_t *)map + offsets[i], &value, sizeof(value));
+   }
+   bo->cpu_dirty = true;
+
+   for (uint32_t i = 0; i < timestamp->count; i++) {
+      v3d_d3dkmt_signal_syncobj_locked(
+         device, v3d_d3dkmt_syncobj_lookup_locked(device, query_syncs[i]));
+   }
+   for (uint32_t i = 0; i < out_sync_count; i++) {
+      v3d_d3dkmt_signal_syncobj_locked(
+         device, v3d_d3dkmt_syncobj_lookup_locked(device, out_syncs[i].handle));
+   }
+   return 0;
+}
+
 static int
 v3d_d3dkmt_ioctl_impl(int fd, unsigned long request, void *arg)
 {
@@ -2164,6 +2316,9 @@ v3d_d3dkmt_ioctl_impl(int fd, unsigned long request, void *arg)
    case DRM_IOCTL_V3D_SUBMIT_CSD:
       result = v3d_d3dkmt_submit_csd_locked(device, arg);
       break;
+   case DRM_IOCTL_V3D_SUBMIT_CPU:
+      result = v3d_d3dkmt_submit_cpu_locked(device, arg);
+      break;
    case DRM_IOCTL_GEM_OPEN: {
       struct drm_gem_open *open_bo = arg;
       struct dwm_dx_shared_surface_info info;
@@ -2220,7 +2375,6 @@ v3d_d3dkmt_ioctl_impl(int fd, unsigned long request, void *arg)
    case DRM_IOCTL_V3D_PERFMON_DESTROY:
    case DRM_IOCTL_V3D_PERFMON_GET_VALUES:
    case DRM_IOCTL_V3D_PERFMON_GET_COUNTER:
-   case DRM_IOCTL_V3D_SUBMIT_CPU:
    default:
       errno = EOPNOTSUPP;
       result = -1;
