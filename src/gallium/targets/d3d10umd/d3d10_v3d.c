@@ -48,6 +48,7 @@ struct pipe_resource *d3d10_open_resource(
    const D3D10DDIARG_OPENRESOURCE *open_resource,
    void *runtime_resource, D3DKMT_HANDLE *allocation);
 void *d3d10_get_present_context(struct pipe_screen *screen);
+UINT d3d10_get_pipeline_support_caps(void);
 bool d3d10_rotate_resource_identities(
    struct pipe_context *pipe, struct pipe_resource *const *resources,
    void *const *runtime_resources,
@@ -243,6 +244,17 @@ void *
 d3d10_get_present_context(struct pipe_screen *screen)
 {
    return v3d_d3dkmt_present_context(screen);
+}
+
+/* V3D samples cube map arrays, blends each render target independently,
+ * gathers texels and resolves 4x MSAA.  Of the 10.1 pipeline only the 32
+ * vertex inputs are missing: V3D fetches 16, the limit ANGLE also uses.
+ */
+UINT
+d3d10_get_pipeline_support_caps(void)
+{
+   return D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_10_0) |
+          D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_10_1);
 }
 
 bool

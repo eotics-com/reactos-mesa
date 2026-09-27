@@ -44,6 +44,9 @@
 EXTERN_C struct pipe_screen *
 d3d10_create_screen(void *adapter, void *device, const void *callbacks);
 
+EXTERN_C UINT
+d3d10_get_pipeline_support_caps(void);
+
 
 static HRESULT APIENTRY CloseAdapter(D3D10DDI_HADAPTER hAdapter);
 
@@ -210,8 +213,7 @@ GetCaps(D3D10DDI_HADAPTER hAdapter,
 
       D3D11DDI_3DPIPELINESUPPORT_CAPS *caps =
          static_cast<D3D11DDI_3DPIPELINESUPPORT_CAPS *>(pData->pData);
-      caps->Caps = D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(
-         D3D11DDI_3DPIPELINELEVEL_10_0);
+      caps->Caps = d3d10_get_pipeline_support_caps();
    }
 
    return S_OK;

@@ -42,6 +42,9 @@
 extern struct pipe_screen *
 d3d10_create_screen(void *adapter, void *device, const void *callbacks);
 
+extern UINT
+d3d10_get_pipeline_support_caps(void);
+
 extern struct pipe_resource *
 d3d10_create_resource(struct pipe_screen *screen,
                       const struct pipe_resource *templ,
@@ -130,6 +133,12 @@ no_screen:
    winsys->destroy(winsys);
 no_winsys:
    return NULL;
+}
+
+UINT
+d3d10_get_pipeline_support_caps(void)
+{
+   return D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_10_0);
 }
 
 void *
