@@ -242,6 +242,9 @@ CreateRasterizerState(
    state.offset_units = (float)pRasterizerDesc->DepthBias;
    state.offset_scale = pRasterizerDesc->SlopeScaledDepthBias;
    state.offset_clamp = pRasterizerDesc->DepthBiasClamp;
+   state.offset_point = state.offset_line = state.offset_tri =
+      pRasterizerDesc->DepthBias != 0 ||
+      pRasterizerDesc->SlopeScaledDepthBias != 0.0f;
    state.multisample = /* pRasterizerDesc->MultisampleEnable */ 0;
    state.half_pixel_center = 1;
    state.bottom_edge_rule = 0;
@@ -257,6 +260,8 @@ CreateRasterizerState(
    state.line_width = 1.0f;
    state.line_rectangular = 0;
 
+   pRasterizerState->state = state;
+   memset(pRasterizerState->variants, 0, sizeof pRasterizerState->variants);
    pRasterizerState->handle = pipe->create_rasterizer_state(pipe, &state);
 }
 
@@ -283,6 +288,12 @@ DestroyRasterizerState(D3D10DDI_HDEVICE hDevice,                     // IN
    RasterizerState *pRasterizerState = CastRasterizerState(hRasterizerState);
 
    pipe->delete_rasterizer_state(pipe, pRasterizerState->handle);
+   for (unsigned i = 0; i < 2; ++i) {
+      for (unsigned j = 0; j <= PIPE_MAX_CLIP_PLANES; ++j) {
+         if (pRasterizerState->variants[i][j])
+            pipe->delete_rasterizer_state(pipe, pRasterizerState->variants[i][j]);
+      }
+   }
 }
 
 
@@ -326,6 +337,7 @@ SetRasterizerState(D3D10DDI_HDEVICE hDevice,                   // IN
          default_state.point_line_tri_clip = 1;
          default_state.line_width = 1.0f;
 
+         pDevice->default_rasterizer_desc = default_state;
          pDevice->default_rasterizer_state =
             pipe->create_rasterizer_state(pipe, &default_state);
          if (!pDevice->default_rasterizer_state) {
@@ -336,5 +348,7 @@ SetRasterizerState(D3D10DDI_HDEVICE hDevice,                   // IN
       state = pDevice->default_rasterizer_state;
    }
 
+   pDevice->bound_rasterizer = CastRasterizerState(hRasterizerState);
+   pDevice->bound_rasterizer_handle = state;
    pipe->bind_rasterizer_state(pipe, state);
 }

@@ -267,10 +267,77 @@ _RotateResourceIdentities( DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *RotateResour
  * ----------------------------------------------------------------------
  */
 
+static void
+BltSubresource(struct pipe_resource *resource, UINT Subresource,
+               unsigned *level, unsigned *layer)
+{
+   UINT MipLevels = resource->last_level + 1;
+
+   *level = Subresource % MipLevels;
+   *layer = Subresource / MipLevels;
+}
+
+
 HRESULT APIENTRY
 _Blt(DXGI_DDI_ARG_BLT *Blt)
 {
-   LOG_UNSUPPORTED_ENTRYPOINT();
+   LOG_ENTRYPOINT();
 
+   struct Device *device = CastDevice(Blt->hDevice);
+   struct pipe_context *pipe = device->pipe;
+   Resource *pSrcResource = CastResource(Blt->hSrcResource);
+   Resource *pDstResource = CastResource(Blt->hDstResource);
+   struct pipe_blit_info info;
+   unsigned src_level, src_layer, dst_level, dst_layer;
+
+   if (!pSrcResource || !pDstResource || pSrcResource->buffer ||
+       pDstResource->buffer ||
+       Blt->SrcSubresource >= pSrcResource->NumSubResources ||
+       Blt->DstSubresource >= pDstResource->NumSubResources ||
+       Blt->DstRight <= Blt->DstLeft || Blt->DstBottom <= Blt->DstTop ||
+       (Blt->Rotate != DXGI_DDI_MODE_ROTATION_UNSPECIFIED &&
+        Blt->Rotate != DXGI_DDI_MODE_ROTATION_IDENTITY))
+      return E_INVALIDARG;
+
+   BltSubresource(pSrcResource->resource, Blt->SrcSubresource,
+                  &src_level, &src_layer);
+   BltSubresource(pDstResource->resource, Blt->DstSubresource,
+                  &dst_level, &dst_layer);
+
+   memset(&info, 0, sizeof info);
+   info.src.resource = pSrcResource->resource;
+   info.src.level = src_level;
+   info.src.format = pSrcResource->resource->format;
+   info.src.box.z = src_layer;
+   info.src.box.width = u_minify(pSrcResource->resource->width0, src_level);
+   info.src.box.height = u_minify(pSrcResource->resource->height0, src_level);
+   info.src.box.depth = 1;
+   info.dst.resource = pDstResource->resource;
+   info.dst.level = dst_level;
+   info.dst.format = pDstResource->resource->format;
+   if (util_format_is_float(info.src.format) &&
+       !util_format_is_srgb(info.dst.format) &&
+       util_format_srgb(info.dst.format) != PIPE_FORMAT_NONE)
+      info.dst.format = util_format_srgb(info.dst.format);
+   info.dst.box.x = Blt->DstLeft;
+   info.dst.box.y = Blt->DstTop;
+   info.dst.box.z = dst_layer;
+   info.dst.box.width = Blt->DstRight - Blt->DstLeft;
+   info.dst.box.height = Blt->DstBottom - Blt->DstTop;
+   info.dst.box.depth = 1;
+   info.mask = util_format_get_mask(info.dst.format);
+   info.filter = PIPE_TEX_FILTER_LINEAR;
+   if (info.src.box.width == info.dst.box.width &&
+       info.src.box.height == info.dst.box.height)
+      info.filter = PIPE_TEX_FILTER_NEAREST;
+
+   if (!pipe->screen->is_format_supported(pipe->screen, info.dst.format,
+                                          pDstResource->resource->target,
+                                          pDstResource->resource->nr_samples,
+                                          pDstResource->resource->nr_storage_samples,
+                                          PIPE_BIND_RENDER_TARGET))
+      info.dst.format = pDstResource->resource->format;
+
+   pipe->blit(pipe, &info);
    return S_OK;
 }

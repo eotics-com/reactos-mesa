@@ -758,11 +758,17 @@ dcl_ps_sgv_input(struct Shader_xlate *sx,
       /* We need to map gallium's front_face to the one expected
        * by D3D10 */
       struct ureg_dst tmp = ureg_DECL_temporary(ureg);
+      struct ureg_dst mask = ureg_DECL_temporary(ureg);
 
       tmp = ureg_writemask(tmp, TGSI_WRITEMASK_X);
+      mask = ureg_writemask(mask, TGSI_WRITEMASK_X);
 
-      ureg_CMP(ureg, tmp, reg,
-               ureg_imm1i(ureg, 0), ureg_imm1i(ureg, -1));
+      ureg_FSLT(ureg, tmp, ureg_imm1f(ureg, 0.0f),
+                ureg_scalar(reg, TGSI_SWIZZLE_X));
+      ureg_USEQ(ureg, mask, ureg_scalar(reg, TGSI_SWIZZLE_X),
+                ureg_imm1u(ureg, 0xffffffff));
+      ureg_OR(ureg, tmp, ureg_src(tmp), ureg_src(mask));
+      ureg_release_temporary(ureg, mask);
 
       reg = ureg_scalar(ureg_src(tmp), TGSI_SWIZZLE_X);
    }
@@ -1185,7 +1191,7 @@ translate_src_operand(struct Shader_xlate *sx,
          reg = sx->imms;
          reg.Index += operand->base.index[0].imm;
          reg = ureg_src_indirect(
-            sx->imms,
+            reg,
             translate_relative_operand(sx, &operand->base.index[0].rel));
          break;
       default:
@@ -1395,6 +1401,7 @@ expand_unary_to_scalarf(struct ureg_program *ureg, unary_ureg_func func,
 const struct tgsi_token *
 Shader_tgsi_translate(const unsigned *code,
                       unsigned *output_mapping,
+                      struct Shader_resource_map *resource_map,
                       bool use_legacy_texture_opcodes)
 {
    struct Shader_xlate sx;
@@ -1408,6 +1415,13 @@ Shader_tgsi_translate(const unsigned *code,
    uint i, j;
 
    use_legacy_texture_opcodes |= (st_debug & ST_DEBUG_OLD_TEX_OPS) != 0;
+
+   resource_map->count = 0;
+   if (use_legacy_texture_opcodes) {
+      for (i = 0; i < SHADER_MAX_RESOURCES; ++i)
+         resource_map->slots[i] = i;
+      resource_map->count = SHADER_MAX_RESOURCES;
+   }
 
    memset(&sx, 0, sizeof sx);
    scan_shader_declarations(code, &sx.num_clip_distances,
@@ -2048,8 +2062,11 @@ Shader_tgsi_translate(const unsigned *code,
          target = translate_resource_dimension(opcode.specific.dcl_resource_dimension);
          sx.resources[res_index].target = target;
          if (!use_legacy_texture_opcodes) {
+            unsigned unit = resource_map->count++;
+
+            resource_map->slots[unit] = res_index;
             sx.sv[res_index] =
-               ureg_DECL_sampler_view(ureg, res_index, target,
+               ureg_DECL_sampler_view(ureg, unit, target,
                                       trans_dcl_ret_type(opcode.dcl_resource_ret_type[0]),
                                       trans_dcl_ret_type(opcode.dcl_resource_ret_type[1]),
                                       trans_dcl_ret_type(opcode.dcl_resource_ret_type[2]),

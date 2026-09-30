@@ -177,9 +177,15 @@ void
 Shader_opcode_free(struct Shader_opcode *opcode);
 
 
+struct Shader_resource_map {
+   unsigned count;
+   unsigned char slots[PIPE_MAX_SHADER_SAMPLER_VIEWS];
+};
+
 const struct tgsi_token *
 Shader_tgsi_translate(const unsigned *code,
                       unsigned *output_mapping,
+                      struct Shader_resource_map *resource_map,
                       bool use_legacy_texture_opcodes);
 
 

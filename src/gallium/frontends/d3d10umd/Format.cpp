@@ -290,6 +290,18 @@ FormatTranslate(DXGI_FORMAT Format, BOOL depth)
 }
 
 
+enum pipe_format
+FormatCompressedSource(DXGI_FORMAT Format, enum pipe_format storage)
+{
+   enum pipe_format source = FormatTranslate(Format, false);
+
+   if (source != storage && util_format_is_compressed(source) &&
+       !util_format_is_compressed(storage))
+      return source;
+   return PIPE_FORMAT_NONE;
+}
+
+
 static enum pipe_format
 FormatTranslateAlternate(DXGI_FORMAT Format, BOOL depth)
 {
@@ -298,16 +310,59 @@ FormatTranslateAlternate(DXGI_FORMAT Format, BOOL depth)
     * The logical DXGI format is identical, so let each pipe driver choose
     * the layout it can actually expose. */
    case DXGI_FORMAT_R24G8_TYPELESS:
+      return PIPE_FORMAT_S8_UINT_Z24_UNORM;
    case DXGI_FORMAT_D24_UNORM_S8_UINT:
       return depth ? PIPE_FORMAT_S8_UINT_Z24_UNORM : PIPE_FORMAT_NONE;
    case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
       return PIPE_FORMAT_X8Z24_UNORM;
    case DXGI_FORMAT_X24_TYPELESS_G8_UINT:
       return PIPE_FORMAT_S8X24_UINT;
+   case DXGI_FORMAT_BC4_TYPELESS:
+   case DXGI_FORMAT_BC4_UNORM:
+      return PIPE_FORMAT_R8_UNORM;
+   case DXGI_FORMAT_BC4_SNORM:
+      return PIPE_FORMAT_R8_SNORM;
+   case DXGI_FORMAT_BC5_TYPELESS:
+   case DXGI_FORMAT_BC5_UNORM:
+      return PIPE_FORMAT_R8G8_UNORM;
+   case DXGI_FORMAT_BC5_SNORM:
+      return PIPE_FORMAT_R8G8_SNORM;
    default:
       return PIPE_FORMAT_NONE;
    }
 }
+
+
+static enum pipe_format
+FormatTypelessStorage(DXGI_FORMAT Format, unsigned index)
+{
+   static const struct {
+      DXGI_FORMAT typeless;
+      enum pipe_format storage[2];
+   } families[] = {
+      {DXGI_FORMAT_R32G32B32A32_TYPELESS, {PIPE_FORMAT_R32G32B32A32_FLOAT, PIPE_FORMAT_R32G32B32A32_UINT}},
+      {DXGI_FORMAT_R32G32B32_TYPELESS, {PIPE_FORMAT_R32G32B32_FLOAT, PIPE_FORMAT_R32G32B32_UINT}},
+      {DXGI_FORMAT_R16G16B16A16_TYPELESS, {PIPE_FORMAT_R16G16B16A16_FLOAT, PIPE_FORMAT_R16G16B16A16_UINT}},
+      {DXGI_FORMAT_R32G32_TYPELESS, {PIPE_FORMAT_R32G32_FLOAT, PIPE_FORMAT_R32G32_UINT}},
+      {DXGI_FORMAT_R16G16_TYPELESS, {PIPE_FORMAT_R16G16_FLOAT, PIPE_FORMAT_R16G16_UINT}},
+      {DXGI_FORMAT_R32_TYPELESS, {PIPE_FORMAT_R32_UINT, PIPE_FORMAT_NONE}},
+      {DXGI_FORMAT_R16_TYPELESS, {PIPE_FORMAT_R16_FLOAT, PIPE_FORMAT_R16_UINT}},
+      {DXGI_FORMAT_R8G8_TYPELESS, {PIPE_FORMAT_R8G8_UINT, PIPE_FORMAT_NONE}},
+      {DXGI_FORMAT_R8_TYPELESS, {PIPE_FORMAT_R8_UINT, PIPE_FORMAT_NONE}},
+      {DXGI_FORMAT_R8G8B8A8_TYPELESS, {PIPE_FORMAT_R8G8B8A8_UINT, PIPE_FORMAT_NONE}},
+      {DXGI_FORMAT_R10G10B10A2_TYPELESS, {PIPE_FORMAT_R10G10B10A2_UINT, PIPE_FORMAT_NONE}},
+   };
+
+   if (index >= 2)
+      return PIPE_FORMAT_NONE;
+   for (unsigned i = 0; i < sizeof families / sizeof families[0]; ++i) {
+      if (families[i].typeless == Format)
+         return families[i].storage[index];
+   }
+   return PIPE_FORMAT_NONE;
+}
+
+
 
 
 enum pipe_format
@@ -327,9 +382,21 @@ FormatTranslateSupported(struct pipe_screen *screen,
 
    format = FormatTranslateAlternate(Format, depth);
    if (format != PIPE_FORMAT_NONE &&
+       (FormatCompressedSource(Format, format) == PIPE_FORMAT_NONE ||
+        !(bind & ~PIPE_BIND_SAMPLER_VIEW)) &&
        screen->is_format_supported(screen, format, target,
                                    sample_count, sample_count, bind))
       return format;
+
+   if (!depth) {
+      for (unsigned i = 0; i < 2; ++i) {
+         format = FormatTypelessStorage(Format, i);
+         if (format != PIPE_FORMAT_NONE &&
+             screen->is_format_supported(screen, format, target,
+                                         sample_count, sample_count, bind))
+            return format;
+      }
+   }
 
    return PIPE_FORMAT_NONE;
 }

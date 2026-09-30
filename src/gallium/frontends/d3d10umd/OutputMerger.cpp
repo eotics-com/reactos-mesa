@@ -38,6 +38,8 @@
 #include "Format.h"
 
 #include "util/u_framebuffer.h"
+#include "util/u_pack_color.h"
+#include "util/u_transfer.h"
 #include "util/format/u_format.h"
 
 
@@ -92,11 +94,14 @@ CreateRenderTargetView(
    pipe_resource_reference(&desc.texture, resource);
    desc.format = FormatTranslate(pCreateRenderTargetView->Format, false);
 
+   pRTView->buffer_first_element = 0;
+   pRTView->buffer_num_elements = 0;
+
    switch (pCreateRenderTargetView->ResourceDimension) {
    case D3D10DDIRESOURCE_BUFFER:
-      LOG_UNSUPPORTED("Render target view into buffer!");
-      SetError(hDevice, E_NOTIMPL);
-      return;
+      pRTView->buffer_first_element = pCreateRenderTargetView->Buffer.FirstElement;
+      pRTView->buffer_num_elements = pCreateRenderTargetView->Buffer.NumElements;
+      break;
    case D3D10DDIRESOURCE_TEXTURE1D:
       ASSERT(pCreateRenderTargetView->Tex1D.ArraySize != (UINT)-1);
       desc.level = pCreateRenderTargetView->Tex1D.MipSlice;
@@ -176,6 +181,7 @@ ClearRenderTargetView(D3D10DDI_HDEVICE hDevice,                      // IN
    LOG_ENTRYPOINT();
 
    struct pipe_context *pipe = CastPipeContext(hDevice);
+   RenderTargetView *pRTView = CastRenderTargetView(hRenderTargetView);
    struct pipe_surface *surface = CastPipeRenderTargetView(hRenderTargetView);
    union pipe_color_union clear_color;
 
@@ -228,6 +234,25 @@ ClearRenderTargetView(D3D10DDI_HDEVICE hDevice,                      // IN
       clear_color.f[1] = pColorRGBA[1];
       clear_color.f[2] = pColorRGBA[2];
       clear_color.f[3] = pColorRGBA[3];
+   }
+
+   if (surface->texture->target == PIPE_BUFFER) {
+      union util_color packed;
+      unsigned element_size = util_format_get_blocksize(surface->format);
+
+      util_pack_color_union(surface->format, &packed, &clear_color);
+      if (pipe->clear_buffer) {
+         pipe->clear_buffer(pipe, surface->texture,
+                            pRTView->buffer_first_element * element_size,
+                            pRTView->buffer_num_elements * element_size,
+                            &packed, element_size);
+      } else {
+         u_default_clear_buffer(pipe, surface->texture,
+                                pRTView->buffer_first_element * element_size,
+                                pRTView->buffer_num_elements * element_size,
+                                &packed, element_size);
+      }
+      return;
    }
 
    pipe->clear_render_target(pipe,
@@ -780,6 +805,10 @@ SetRenderTargets(D3D10DDI_HDEVICE hDevice,                              // IN
    pDevice->fb.nr_cbufs = 0;
    for (unsigned i = 0; i < RTargets; ++i) {
       struct pipe_surface *psurf = CastPipeRenderTargetView(phRenderTargetView[i]);
+      if (psurf && psurf->texture && psurf->texture->target == PIPE_BUFFER) {
+         LOG_UNSUPPORTED("Render target view into buffer!");
+         psurf = NULL;
+      }
       pipe_resource_reference(&pDevice->fb.cbufs[i].texture,
                               psurf && psurf->texture ? psurf->texture : NULL);
       if (psurf && psurf->texture) {

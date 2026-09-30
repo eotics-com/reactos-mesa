@@ -105,6 +105,15 @@ SIZE_T APIENTRY CalcPrivateGeometryShaderWithStreamOutput(
    __in const D3D10DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT *pCreateGeometryShaderWithStreamOutput,
    __in const D3D10DDIARG_STAGE_IO_SIGNATURES *pSignatures);
 
+void CreateGeometryShaderWithStreamOutputStrides(
+   D3D10DDI_HDEVICE hDevice,
+   const D3D10DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT *pData,
+   const UINT *pStrides,
+   UINT NumStrides,
+   D3D10DDI_HSHADER hShader,
+   D3D10DDI_HRTSHADER hRTShader,
+   const D3D10DDIARG_STAGE_IO_SIGNATURES *pSignatures);
+
 void APIENTRY CreateGeometryShaderWithStreamOutput(
    D3D10DDI_HDEVICE hDevice,
    __in const D3D10DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT *pCreateGeometryShaderWithStreamOutput,

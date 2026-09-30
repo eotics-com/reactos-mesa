@@ -198,6 +198,34 @@ subResourceBox(struct pipe_resource *resource, // IN
 }
 
 
+
+static bool
+DepthStencilLayoutDiffers(enum pipe_format format)
+{
+   return format == PIPE_FORMAT_S8_UINT_Z24_UNORM ||
+          format == PIPE_FORMAT_X8Z24_UNORM ||
+          format == PIPE_FORMAT_S8X24_UINT;
+}
+
+
+static void
+ConvertDepthStencilLayout(void *map, unsigned stride, unsigned layer_stride,
+                          unsigned width, unsigned height, unsigned depth,
+                          bool to_dxgi)
+{
+   for (unsigned z = 0; z < depth; ++z) {
+      for (unsigned y = 0; y < height; ++y) {
+         uint32_t *row = (uint32_t *)((uint8_t *)map + z * layer_stride +
+                                      y * stride);
+         for (unsigned x = 0; x < width; ++x) {
+            row[x] = to_dxgi ? (row[x] >> 8) | (row[x] << 24)
+                             : (row[x] << 8) | (row[x] >> 24);
+         }
+      }
+   }
+}
+
+
 /*
  * ----------------------------------------------------------------------
  *
@@ -336,12 +364,22 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
    } else {
       const BOOL bindDepthStencil =
          !!(pCreateResource->BindFlags & D3D10_DDI_BIND_DEPTH_STENCIL);
-      templat.format = FormatTranslateSupported(screen,
-                                                pCreateResource->Format,
-                                                bindDepthStencil,
-                                                templat.target,
-                                                templat.nr_samples,
-                                                templat.bind);
+      templat.format = PIPE_FORMAT_NONE;
+      if (!templat.bind) {
+         templat.format = FormatTranslateSupported(
+            screen, pCreateResource->Format,
+            util_format_is_depth_or_stencil(
+               FormatTranslate(pCreateResource->Format, true)),
+            templat.target, templat.nr_samples, PIPE_BIND_SAMPLER_VIEW);
+      }
+      if (templat.format == PIPE_FORMAT_NONE) {
+         templat.format = FormatTranslateSupported(screen,
+                                                   pCreateResource->Format,
+                                                   bindDepthStencil,
+                                                   templat.target,
+                                                   templat.nr_samples,
+                                                   templat.bind);
+      }
       if (templat.format == PIPE_FORMAT_NONE) {
          SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
          return;
@@ -413,9 +451,19 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
                                     &transfer);
             assert(map);
             if (map) {
+               enum pipe_format source =
+                  FormatCompressedSource(pResource->Format, templat.format);
                for (int z = 0; z < box.depth; ++z) {
                   uint8_t *dst = (uint8_t*)map + z*transfer->layer_stride;
                   const uint8_t *src = (const uint8_t*)pInitialDataUP->pSysMem + z*pInitialDataUP->SysMemSlicePitch;
+                  if (source != PIPE_FORMAT_NONE) {
+                     util_format_translate(templat.format, dst,
+                                           transfer->stride, 0, 0,
+                                           source, src,
+                                           pInitialDataUP->SysMemPitch, 0, 0,
+                                           box.width, box.height);
+                     continue;
+                  }
                   util_copy_rect(dst,
                                  templat.format,
                                  transfer->stride,
@@ -423,6 +471,11 @@ CreateResource(D3D10DDI_HDEVICE hDevice,                                // IN
                                  src,
                                  pInitialDataUP->SysMemPitch,
                                  0, 0);
+               }
+               if (DepthStencilLayoutDiffers(pResource->resource->format)) {
+                  ConvertDepthStencilLayout(map, transfer->stride,
+                                            transfer->layer_stride, box.width,
+                                            box.height, box.depth, false);
                }
                pipe_texture_unmap(pipe, transfer);
             }
@@ -613,6 +666,7 @@ DestroyResource(D3D10DDI_HDEVICE hDevice,       // IN
       }
    }
    free(pResource->transfers);
+   free(pResource->maps);
 
    pipe_resource_reference(&pResource->resource, NULL);
 }
@@ -699,6 +753,26 @@ ResourceMap(D3D10DDI_HDEVICE hDevice,                                // IN
       return;
    }
 
+   if (!pResource->buffer && DepthStencilLayoutDiffers(resource->format)) {
+      struct pipe_transfer *transfer = pResource->transfers[SubResource];
+
+      if (!pResource->maps)
+         pResource->maps = (void **)calloc(pResource->NumSubResources,
+                                           sizeof *pResource->maps);
+      if (!pResource->maps) {
+         pipe_texture_unmap(pipe, transfer);
+         pResource->transfers[SubResource] = NULL;
+         SetError(hDevice, E_OUTOFMEMORY);
+         return;
+      }
+      pResource->maps[SubResource] = map;
+      if (DDIMap != D3D10_DDI_MAP_WRITE_DISCARD) {
+         ConvertDepthStencilLayout(map, transfer->stride, transfer->layer_stride,
+                                   transfer->box.width, transfer->box.height,
+                                   transfer->box.depth, true);
+      }
+   }
+
    pMappedSubResource->pData = map;
    pMappedSubResource->RowPitch = pResource->transfers[SubResource]->stride;
    pMappedSubResource->DepthPitch = pResource->transfers[SubResource]->layer_stride;
@@ -731,7 +805,16 @@ ResourceUnmap(D3D10DDI_HDEVICE hDevice,      // IN
       if (pResource->buffer) {
          pipe_buffer_unmap(pipe, pResource->transfers[SubResource]);
       } else {
-         pipe_texture_unmap(pipe, pResource->transfers[SubResource]);
+         struct pipe_transfer *transfer = pResource->transfers[SubResource];
+
+         if (pResource->maps && pResource->maps[SubResource]) {
+            ConvertDepthStencilLayout(pResource->maps[SubResource],
+                                      transfer->stride, transfer->layer_stride,
+                                      transfer->box.width, transfer->box.height,
+                                      transfer->box.depth, false);
+            pResource->maps[SubResource] = NULL;
+         }
+         pipe_texture_unmap(pipe, transfer);
       }
       pResource->transfers[SubResource] = NULL;
    }
@@ -824,13 +907,17 @@ ResourceCopy(D3D10DDI_HDEVICE hDevice,          // IN
    bool compatible;
 
    assert(dst_resource->target == src_resource->target);
-   assert(dst_resource->width0 == src_resource->width0);
-   assert(dst_resource->height0 == src_resource->height0);
-   assert(dst_resource->depth0 == src_resource->depth0);
    assert(dst_resource->last_level == src_resource->last_level);
    assert(dst_resource->array_size == src_resource->array_size);
 
    compatible = areResourcesCompatible(src_resource, dst_resource);
+   if (!compatible) {
+      for (unsigned sub = 0; sub < pDstResource->NumSubResources; ++sub) {
+         ResourceCopyRegion(hDevice, hDstResource, sub, 0, 0, 0,
+                            hSrcResource, sub, NULL);
+      }
+      return;
+   }
 
    /* could also use one 3d copy for arrays */
    for (unsigned layer = 0; layer < dst_resource->array_size; ++layer) {
@@ -916,6 +1003,52 @@ ResourceCopyRegion(D3D10DDI_HDEVICE hDevice,                // IN
       src_box.width  = u_minify(src_resource->width0,  src_level);
       src_box.height = u_minify(src_resource->height0, src_level);
       src_box.depth  = u_minify(src_resource->depth0,  src_level);
+   }
+
+   enum pipe_format dst_source =
+      FormatCompressedSource(pDstResource->Format, dst_resource->format);
+   enum pipe_format src_source =
+      FormatCompressedSource(pSrcResource->Format, src_resource->format);
+   if (dst_source != src_source) {
+      if (dst_source == PIPE_FORMAT_NONE || src_source != PIPE_FORMAT_NONE ||
+          util_format_get_blocksize(src_resource->format) !=
+             util_format_get_blocksize(dst_source)) {
+         LOG_UNSUPPORTED(true);
+         return;
+      }
+
+      unsigned bw = util_format_get_blockwidth(dst_source);
+      unsigned bh = util_format_get_blockheight(dst_source);
+      struct pipe_box dst_box;
+      dst_box.x = DstX;
+      dst_box.y = DstY;
+      dst_box.z = DstZ + dst_layer;
+      dst_box.width = MIN2(src_box.width * bw,
+                           u_minify(dst_resource->width0, dst_level) - DstX);
+      dst_box.height = MIN2(src_box.height * bh,
+                            u_minify(dst_resource->height0, dst_level) - DstY);
+      dst_box.depth = src_box.depth;
+
+      struct pipe_transfer *src_transfer, *dst_transfer;
+      void *src_map = pipe->texture_map(pipe, src_resource, src_level,
+                                        PIPE_MAP_READ, &src_box, &src_transfer);
+      if (!src_map)
+         return;
+      void *dst_map = pipe->texture_map(pipe, dst_resource, dst_level,
+                                        PIPE_MAP_WRITE, &dst_box, &dst_transfer);
+      if (dst_map) {
+         for (int z = 0; z < dst_box.depth; ++z) {
+            util_format_translate(dst_resource->format,
+                                  (uint8_t *)dst_map + z * dst_transfer->layer_stride,
+                                  dst_transfer->stride, 0, 0, dst_source,
+                                  (const uint8_t *)src_map + z * src_transfer->layer_stride,
+                                  src_transfer->stride, 0, 0,
+                                  dst_box.width, dst_box.height);
+         }
+         pipe->texture_unmap(pipe, dst_transfer);
+      }
+      pipe->texture_unmap(pipe, src_transfer);
+      return;
    }
 
    if (areResourcesCompatible(src_resource, dst_resource)) {
@@ -1092,9 +1225,17 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
    }
    assert(map);
    if (map) {
+      enum pipe_format source = pDstResource->buffer ? PIPE_FORMAT_NONE :
+         FormatCompressedSource(pDstResource->Format, dst_resource->format);
       for (int z = 0; z < box.depth; ++z) {
          uint8_t *dst = (uint8_t*)map + z*transfer->layer_stride;
          const uint8_t *src = (const uint8_t*)pSysMemUP + z*DepthPitch;
+         if (source != PIPE_FORMAT_NONE) {
+            util_format_translate(dst_resource->format, dst, transfer->stride,
+                                  0, 0, source, src, RowPitch, 0, 0,
+                                  box.width, box.height);
+            continue;
+         }
          util_copy_rect(dst,
                         dst_resource->format,
                         transfer->stride,
@@ -1102,6 +1243,11 @@ ResourceUpdateSubResourceUP(D3D10DDI_HDEVICE hDevice,                // IN
                         src,
                         RowPitch,
                         0, 0);
+      }
+      if (!pDstResource->buffer &&
+          DepthStencilLayoutDiffers(dst_resource->format)) {
+         ConvertDepthStencilLayout(map, transfer->stride, transfer->layer_stride,
+                                   box.width, box.height, box.depth, false);
       }
       if (pDstResource->buffer) {
          pipe_buffer_unmap(pipe, transfer);

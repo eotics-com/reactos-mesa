@@ -42,6 +42,8 @@
 #include "State.h"
 #include "Format.h"
 
+#include <float.h>
+
 #include "Debug.h"
 
 #include "util/u_sampler.h"
@@ -222,7 +224,8 @@ GeometryShaderWithStreamOutputIsD3D10Compatible(
        (pCreateData->NumStrides && !pCreateData->BufferStridesInBytes))
       return false;
 
-   if (pCreateData->NumStrides > 1 || pCreateData->RasterizedStream != 0)
+   if (pCreateData->NumStrides > PIPE_MAX_SO_BUFFERS ||
+       pCreateData->RasterizedStream != 0)
       return false;
 
    for (UINT i = 0; i < pCreateData->NumEntries; ++i) {
@@ -331,7 +334,8 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
       return E_FAIL;
    }
    pDevice->pipe = pipe;
-   pDevice->cso = cso_create_context(pipe, CSO_NO_VBUF);
+   pDevice->cso = cso_create_context(pipe, CSO_NO_USER_VERTEX_BUFFERS |
+                                            CSO_NO_64B_VERTEX_BUFFERS);
    if (!pDevice->cso) {
       pipe->destroy(pipe);
       pDevice->pipe = NULL;
@@ -356,15 +360,59 @@ CreateDevice(D3D10DDI_HADAPTER hAdapter,                 // IN
    SetDepthStencilState(pCreateData->hDrvDevice, default_depth_stencil, 0);
    SetRasterizerState(pCreateData->hDrvDevice, default_rasterizer);
 
+   struct pipe_sampler_state default_sampler;
+   memset(&default_sampler, 0, sizeof default_sampler);
+   default_sampler.seamless_cube_map = 1;
+   default_sampler.wrap_s = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+   default_sampler.wrap_t = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+   default_sampler.wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+   default_sampler.min_img_filter = PIPE_TEX_FILTER_LINEAR;
+   default_sampler.mag_img_filter = PIPE_TEX_FILTER_LINEAR;
+   default_sampler.min_mip_filter = PIPE_TEX_MIPFILTER_LINEAR;
+   default_sampler.min_lod = -FLT_MAX;
+   default_sampler.max_lod = FLT_MAX;
+   default_sampler.border_color.f[0] = 1.0f;
+   default_sampler.border_color.f[1] = 1.0f;
+   default_sampler.border_color.f[2] = 1.0f;
+   default_sampler.border_color.f[3] = 1.0f;
+   pDevice->default_sampler_state = pipe->create_sampler_state(pipe, &default_sampler);
+
    if (!pDevice->default_blend_state ||
        !pDevice->default_depth_stencil_state ||
-       !pDevice->default_rasterizer_state) {
+       !pDevice->default_rasterizer_state ||
+       !pDevice->default_sampler_state) {
       DestroyDevice(pCreateData->hDrvDevice);
       return E_OUTOFMEMORY;
    }
 
+   for (unsigned stage = 0; stage < MESA_SHADER_STAGES; ++stage) {
+      const unsigned max_samplers = MIN2(screen->shader_caps[stage].max_texture_samplers,
+                                         PIPE_MAX_SAMPLERS);
+      void *samplers[PIPE_MAX_SAMPLERS];
+
+      for (unsigned i = 0; i < max_samplers; ++i)
+         samplers[i] = pDevice->default_sampler_state;
+      if (max_samplers && pipe->bind_sampler_states)
+         pipe->bind_sampler_states(pipe, (mesa_shader_stage)stage, 0, max_samplers, samplers);
+   }
+
    pDevice->max_dual_source_render_targets =
          screen->caps.max_dual_source_render_targets;
+   pDevice->velems_changed = TRUE;
+   pDevice->zero_vertex_buffer = pipe_buffer_create(pipe->screen,
+                                                    PIPE_BIND_VERTEX_BUFFER,
+                                                    PIPE_USAGE_IMMUTABLE,
+                                                    4096);
+   if (pDevice->zero_vertex_buffer) {
+      static const uint8_t zeros[4096] = {};
+      pipe_buffer_write(pipe, pDevice->zero_vertex_buffer, 0, sizeof zeros,
+                        zeros);
+      for (unsigned i = 0; i < PIPE_MAX_ATTRIBS; ++i) {
+         pipe_resource_reference(&pDevice->vertex_buffers[i].buffer.resource,
+                                 pDevice->zero_vertex_buffer);
+      }
+      pDevice->vbuffers_changed = TRUE;
+   }
 
    pDevice->draw_so_target = NULL;
 
@@ -599,6 +647,17 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    }
    if (pDevice->default_rasterizer_state)
       pipe->delete_rasterizer_state(pipe, pDevice->default_rasterizer_state);
+   for (unsigned i = 0; i < 2; ++i) {
+      for (unsigned j = 0; j <= PIPE_MAX_CLIP_PLANES; ++j) {
+         if (pDevice->default_rasterizer_variants[i][j])
+            pipe->delete_rasterizer_state(pipe,
+                                          pDevice->default_rasterizer_variants[i][j]);
+      }
+   }
+   if (pDevice->default_sampler_state)
+      pipe->delete_sampler_state(pipe, pDevice->default_sampler_state);
+   if (pDevice->so_variant_handle)
+      pipe->delete_vs_state(pipe, pDevice->so_variant_handle);
 
    util_unreference_framebuffer_state(&pDevice->fb);
 
@@ -609,6 +668,7 @@ DestroyDevice(D3D10DDI_HDEVICE hDevice)   // IN
    }
 
    pipe_resource_reference(&pDevice->index_buffer, NULL);
+   pipe_resource_reference(&pDevice->zero_vertex_buffer, NULL);
 
    static struct pipe_sampler_view *sampler_views[PIPE_MAX_SHADER_SAMPLER_VIEWS];
    memset(sampler_views, 0, sizeof sampler_views);
@@ -860,8 +920,10 @@ CreateGeometryShaderWithStreamOutput11(
    args.NumEntries = pCreateData->NumEntries;
    args.StreamOutputStrideInBytes = pCreateData->NumStrides
       ? pCreateData->BufferStridesInBytes[0] : 0;
-   CreateGeometryShaderWithStreamOutput(hDevice, &args, hShader, hRTShader,
-                                        pSignatures);
+   CreateGeometryShaderWithStreamOutputStrides(hDevice, &args,
+                                               pCreateData->BufferStridesInBytes,
+                                               pCreateData->NumStrides,
+                                               hShader, hRTShader, pSignatures);
    free(entries);
 }
 #endif

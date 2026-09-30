@@ -46,6 +46,9 @@ FormatTranslateSupported(struct pipe_screen *screen,
                          unsigned sample_count,
                          unsigned bind);
 
+enum pipe_format
+FormatCompressedSource(DXGI_FORMAT Format, enum pipe_format storage);
+
 const char *
 FormatToName(DXGI_FORMAT Format);
 

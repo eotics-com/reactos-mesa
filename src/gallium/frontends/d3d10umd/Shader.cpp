@@ -229,8 +229,13 @@ SetSamplers(mesa_shader_stage shader_type,     // IN
       }
    }
 
-   if (max_samplers)
-      pipe->bind_sampler_states(pipe, shader_type, 0, max_samplers, samplers);
+   if (max_samplers) {
+      void *bound[PIPE_MAX_SAMPLERS];
+
+      for (unsigned i = 0; i < max_samplers; ++i)
+         bound[i] = samplers[i] ? samplers[i] : pDevice->default_sampler_state;
+      pipe->bind_sampler_states(pipe, shader_type, 0, max_samplers, bound);
+   }
 }
 
 
@@ -261,25 +266,12 @@ SetShaderResources(mesa_shader_stage shader_type,                  // IN
 
    struct pipe_sampler_view **sampler_views = pDevice->sampler_views[shader_type];
    for (UINT i = 0; i < NumViews; i++) {
-      struct pipe_sampler_view *sampler_view =
+      sampler_views[Offset + i] =
             CastPipeShaderResourceView(phShaderResourceViews[i]);
-      if (Offset + i < max_views) {
-         sampler_views[Offset + i] = sampler_view;
-      } else {
-         if (sampler_view) {
-            LOG_UNSUPPORTED(true);
-            break;
-         }
-      }
    }
 
-   /*
-    * XXX: Now that the semantics are actually the same in gallium, should
-    * probably think about not updating all always... It should just work.
-    */
    if (max_views)
-      pipe->set_sampler_views(pipe, shader_type, 0, max_views, 0,
-                              sampler_views);
+      pDevice->sampler_views_dirty[shader_type] = true;
 }
 
 
@@ -323,8 +315,24 @@ DestroyShader(D3D10DDI_HDEVICE hDevice,   // IN
 {
    LOG_ENTRYPOINT();
 
+   Device *pDevice = CastDevice(hDevice);
    struct pipe_context *pipe = CastPipeContext(hDevice);
    Shader *pShader = CastShader(hShader);
+
+   if (pDevice->bound_vs == pShader)
+      pDevice->bound_vs = NULL;
+   if (pDevice->bound_gs == pShader)
+      pDevice->bound_gs = NULL;
+   if (pDevice->bound_ps == pShader)
+      pDevice->bound_ps = NULL;
+
+   if (pDevice->so_variant_handle &&
+       (pDevice->so_variant_vs == pShader || pDevice->so_variant_gs == pShader)) {
+      pipe->delete_vs_state(pipe, pDevice->so_variant_handle);
+      pDevice->so_variant_handle = NULL;
+      pDevice->so_variant_vs = NULL;
+      pDevice->so_variant_gs = NULL;
+   }
 
    if (pShader->handle) {
       switch (pShader->type) {
@@ -578,7 +586,7 @@ CreateVertexShader(D3D10DDI_HDEVICE hDevice,                                  //
 
    memset(&pShader->state, 0, sizeof pShader->state);
    pShader->state.tokens = Shader_tgsi_translate(
-      pCode, pShader->output_mapping,
+      pCode, pShader->output_mapping, &pShader->resources,
       UseLegacyTextureOpcodes(pDevice, MESA_SHADER_VERTEX));
 
    pShader->handle = pipe->create_vs_state(pipe, &pShader->state);
@@ -609,6 +617,7 @@ VsSetShader(D3D10DDI_HDEVICE hDevice,  // IN
    void *state = CastPipeShader(hShader);
 
    pDevice->bound_vs = pShader;
+   pDevice->sampler_views_dirty[MESA_SHADER_VERTEX] = true;
    if (!state) {
       state = pDevice->empty_vs;
    }
@@ -717,7 +726,7 @@ CreateGeometryShader(D3D10DDI_HDEVICE hDevice,                                //
 
    memset(&pShader->state, 0, sizeof pShader->state);
    pShader->state.tokens = Shader_tgsi_translate(
-      pShaderCode, pShader->output_mapping,
+      pShaderCode, pShader->output_mapping, &pShader->resources,
       UseLegacyTextureOpcodes(pDevice, MESA_SHADER_GEOMETRY));
 
    pShader->handle = pipe->create_gs_state(pipe, &pShader->state);
@@ -748,9 +757,17 @@ GsSetShader(D3D10DDI_HDEVICE hDevice,  // IN
 
    assert(pipe->bind_gs_state);
 
+   pDevice->gs_bound = pShader && pShader->state.tokens;
+   pDevice->bound_gs = pDevice->gs_bound ? pShader : NULL;
+   pDevice->sampler_views_dirty[MESA_SHADER_GEOMETRY] = true;
    if (pShader && !pShader->state.tokens) {
       pDevice->bound_empty_gs = pShader;
+      pipe->bind_gs_state(pipe, NULL);
    } else {
+      if (pDevice->bound_empty_gs) {
+         pipe->bind_vs_state(pipe, pDevice->bound_vs && pDevice->bound_vs->handle ?
+                                   pDevice->bound_vs->handle : pDevice->empty_vs);
+      }
       pDevice->bound_empty_gs = NULL;
       pipe->bind_gs_state(pipe, state);
    }
@@ -870,6 +887,21 @@ CreateGeometryShaderWithStreamOutput(
    D3D10DDI_HRTSHADER hRTShader,                                                                         // IN
    __in const D3D10DDIARG_STAGE_IO_SIGNATURES *pSignatures)                                              // IN
 {
+   CreateGeometryShaderWithStreamOutputStrides(hDevice, pData, NULL, 0,
+                                               hShader, hRTShader, pSignatures);
+}
+
+
+void
+CreateGeometryShaderWithStreamOutputStrides(
+   D3D10DDI_HDEVICE hDevice,
+   const D3D10DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT *pData,
+   const UINT *pStrides,
+   UINT NumStrides,
+   D3D10DDI_HSHADER hShader,
+   D3D10DDI_HRTSHADER hRTShader,
+   const D3D10DDIARG_STAGE_IO_SIGNATURES *pSignatures)
+{
    LOG_ENTRYPOINT();
 
    Device *pDevice = CastDevice(hDevice);
@@ -885,6 +917,7 @@ CreateGeometryShaderWithStreamOutput(
    if (pData->pShaderCode) {
       pShader->state.tokens = Shader_tgsi_translate(pData->pShaderCode,
                                                     pShader->output_mapping,
+                                                    &pShader->resources,
                                                     UseLegacyTextureOpcodes(
                                                        pDevice,
                                                        MESA_SHADER_GEOMETRY));
@@ -934,7 +967,9 @@ CreateGeometryShaderWithStreamOutput(
    pShader->state.stream_output.num_outputs = pData->NumEntries - num_holes;
    for (unsigned i = 0; i < PIPE_MAX_SO_BUFFERS; ++i) {
       /* stream_output.stride[i] is in dwords */
-      if (all_slot_zero) {
+      if (i < NumStrides && pStrides[i]) {
+         pShader->state.stream_output.stride[i] = pStrides[i] / sizeof(float);
+      } else if (all_slot_zero) {
          pShader->state.stream_output.stride[i] =
             pData->StreamOutputStrideInBytes / sizeof(float);
       } else {
@@ -942,7 +977,10 @@ CreateGeometryShaderWithStreamOutput(
       }
    }
 
-   pShader->handle = pipe->create_gs_state(pipe, &pShader->state);
+   if (pShader->state.tokens)
+      pShader->handle = pipe->create_gs_state(pipe, &pShader->state);
+   else
+      pShader->handle = NULL;
 }
 
 
@@ -1041,6 +1079,7 @@ CreatePixelShader(D3D10DDI_HDEVICE hDevice,                                // IN
    memset(&pShader->state, 0, sizeof pShader->state);
    pShader->state.tokens = Shader_tgsi_translate(pShaderCode,
                                                  pShader->output_mapping,
+                                                 &pShader->resources,
                                                  UseLegacyTextureOpcodes(
                                                     pDevice,
                                                     MESA_SHADER_FRAGMENT));
@@ -1071,6 +1110,9 @@ PsSetShader(D3D10DDI_HDEVICE hDevice,  // IN
    struct pipe_context *pipe = pDevice->pipe;
    void *state = CastPipeShader(hShader);
 
+   pDevice->ps_bound = state != NULL;
+   pDevice->bound_ps = state ? CastShader(hShader) : NULL;
+   pDevice->sampler_views_dirty[MESA_SHADER_FRAGMENT] = true;
    if (!state) {
       state = pDevice->empty_fs;
    }
@@ -1228,6 +1270,31 @@ CalcPrivateShaderResourceViewSize1(
  * ----------------------------------------------------------------------
  */
 
+static enum pipe_format
+DepthStencilSamplerViewFormat(struct pipe_screen *screen,
+                              struct pipe_resource *resource,
+                              DXGI_FORMAT view_format,
+                              enum pipe_format format)
+{
+   bool stencil;
+   enum pipe_format view;
+
+   if (!util_format_is_depth_or_stencil(resource->format))
+      return format;
+
+   stencil = view_format == DXGI_FORMAT_X24_TYPELESS_G8_UINT ||
+             view_format == DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+   view = stencil ? util_format_stencil_only(resource->format) :
+                    util_format_get_depth_only(resource->format);
+   if (view != PIPE_FORMAT_NONE &&
+       screen->is_format_supported(screen, view, resource->target,
+                                   resource->nr_samples, resource->nr_samples,
+                                   PIPE_BIND_SAMPLER_VIEW))
+      return view;
+   return format;
+}
+
+
 void APIENTRY
 CreateShaderResourceView(
    D3D10DDI_HDEVICE hDevice,                                                     // IN
@@ -1253,6 +1320,9 @@ CreateShaderResourceView(
       SetError(hDevice, DXGI_DDI_ERR_UNSUPPORTED);
       return;
    }
+
+   format = DepthStencilSamplerViewFormat(pipe->screen, resource,
+                                          pCreateSRView->Format, format);
 
    u_sampler_view_default_template(&desc,
                                    resource,
@@ -1341,6 +1411,9 @@ CreateShaderResourceView1(
       return;
    }
 
+   format = DepthStencilSamplerViewFormat(pipe->screen, resource,
+                                          pCreateSRView->Format, format);
+
    u_sampler_view_default_template(&desc,
                                    resource,
                                    format);
@@ -1416,6 +1489,15 @@ DestroyShaderResourceView(D3D10DDI_HDEVICE hDevice,                           //
 
    Device *pDevice = CastDevice(hDevice);
    struct pipe_context *pipe = pDevice->pipe;
+
+   for (unsigned stage = 0; stage < MESA_SHADER_STAGES; ++stage) {
+      for (unsigned i = 0; i < PIPE_MAX_SHADER_SAMPLER_VIEWS; ++i) {
+         if (pDevice->sampler_views[stage][i] == pSRView->handle) {
+            pDevice->sampler_views[stage][i] = NULL;
+            pDevice->sampler_views_dirty[stage] = true;
+         }
+      }
+   }
 
    pipe->sampler_view_release(pipe, pSRView->handle);
    pSRView->handle = NULL;

@@ -34,6 +34,7 @@
 #include "DriverIncludes.h"
 #include "util/u_hash_table.h"
 #include "cso_cache/cso_context.h"
+#include "ShaderParse.h"
 
 #define SUPPORT_MSAA 1
 #define SUPPORT_D3D10_1 0
@@ -59,9 +60,14 @@ struct Shader
    struct pipe_shader_state state;
    unsigned output_mapping[PIPE_MAX_SHADER_OUTPUTS];
    bool output_resolved;
+   bool position_checked;
+   bool writes_position;
+   unsigned clip_distances;
+   struct Shader_resource_map resources;
 };
 
 struct Query;
+struct RasterizerState;
 struct ElementLayout;
 
 struct Device
@@ -77,6 +83,7 @@ struct Device
    struct pipe_vertex_buffer vertex_buffers[PIPE_MAX_ATTRIBS];
    unsigned vertex_strides[PIPE_MAX_ATTRIBS];
    struct pipe_resource *index_buffer;
+   struct pipe_resource *zero_vertex_buffer;
    unsigned restart_index;
    unsigned index_size;
    unsigned ib_offset;
@@ -89,6 +96,11 @@ struct Device
    void *default_blend_state;
    void *default_depth_stencil_state;
    void *default_rasterizer_state;
+   void *default_rasterizer_variants[2][PIPE_MAX_CLIP_PLANES + 1];
+   struct pipe_rasterizer_state default_rasterizer_desc;
+   struct RasterizerState *bound_rasterizer;
+   void *bound_rasterizer_handle;
+   void *default_sampler_state;
 
    enum mesa_prim primitive;
 
@@ -96,6 +108,20 @@ struct Device
    struct pipe_stream_output_target *draw_so_target;
    Shader *bound_empty_gs;
    Shader *bound_vs;
+   Shader *bound_gs;
+   Shader *bound_ps;
+   bool sampler_views_dirty[MESA_SHADER_STAGES];
+   Shader *so_variant_vs;
+   Shader *so_variant_gs;
+   void *so_variant_handle;
+   bool gs_bound;
+   bool ps_bound;
+
+   uint64_t ia_vertices;
+   uint64_t ia_primitives;
+   uint64_t gs_invocations;
+   uint64_t ps_draws;
+   uint64_t so_draws;
 
    unsigned max_dual_source_render_targets;
 
@@ -113,6 +139,7 @@ struct Device
 
    Query *pPredicate;
    BOOL PredicateValue;
+   bool predicate_emulated;
 
    ElementLayout *element_layout;
    BOOL velems_changed;
@@ -170,6 +197,7 @@ struct Resource
    HANDLE runtime_resource;
    struct pipe_resource *resource;
    struct pipe_transfer **transfers;
+   void **maps;
    struct pipe_stream_output_target *so_target;
 };
 
@@ -218,6 +246,8 @@ CastPipeBuffer(D3D10DDI_HRESOURCE hResource)
 struct RenderTargetView
 {
    struct pipe_surface surface;
+   unsigned buffer_first_element;
+   unsigned buffer_num_elements;
    D3D10DDI_HRTRENDERTARGETVIEW hRTRenderTargetView;
 };
 
@@ -304,6 +334,8 @@ CastPipeDepthStencilState(D3D10DDI_HDEPTHSTENCILSTATE hDepthStencilState)
 struct RasterizerState
 {
    void *handle;
+   void *variants[2][PIPE_MAX_CLIP_PLANES + 1];
+   struct pipe_rasterizer_state state;
 };
 
 
@@ -340,6 +372,7 @@ CastPipeShader(D3D10DDI_HSHADER hShader)
 struct ElementLayout
 {
    struct cso_velems_state state;
+   uint32_t constant_mask;
 };
 
 
@@ -402,6 +435,13 @@ struct Query
    UINT GetDataCount;
 
    D3D10_DDI_QUERY_DATA_PIPELINE_STATISTICS Statistics;
+
+   struct pipe_query *emulation[2];
+   uint64_t ia_vertices;
+   uint64_t ia_primitives;
+   uint64_t gs_invocations;
+   uint64_t ps_draws;
+   uint64_t so_draws;
 };
 
 

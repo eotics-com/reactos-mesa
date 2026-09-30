@@ -156,9 +156,9 @@ IaSetVertexBuffers(D3D10DDI_HDEVICE hDevice,                                    
          if (vb->is_user_buffer) {
             vb->buffer.user = NULL;
             vb->is_user_buffer = false;
-         } else {
-            pipe_resource_reference(&vb->buffer.resource, NULL);
          }
+         pipe_resource_reference(&vb->buffer.resource,
+                                 pDevice->zero_vertex_buffer);
       }
    }
 
@@ -273,9 +273,7 @@ CreateElementLayout(
           (pVertexElement->InputSlotClass != D3D10_DDI_INPUT_PER_VERTEX_DATA &&
            pVertexElement->InputSlotClass != D3D10_DDI_INPUT_PER_INSTANCE_DATA) ||
           (pVertexElement->InputSlotClass == D3D10_DDI_INPUT_PER_VERTEX_DATA &&
-           pVertexElement->InstanceDataStepRate != 0) ||
-          (pVertexElement->InputSlotClass == D3D10_DDI_INPUT_PER_INSTANCE_DATA &&
-           pVertexElement->InstanceDataStepRate == 0))
+           pVertexElement->InstanceDataStepRate != 0))
          goto invalid;
 
       for (unsigned j = 0; j < i; ++j) {
@@ -314,6 +312,8 @@ CreateElementLayout(
          break;
       case D3D10_DDI_INPUT_PER_INSTANCE_DATA:
          ve->instance_divisor = pVertexElement->InstanceDataStepRate;
+         if (!ve->instance_divisor)
+            pElementLayout->constant_mask |= 1u << compact_index;
          break;
       }
    }
