@@ -247,10 +247,10 @@ v3dX(emit_state)(struct pipe_context *pctx)
                           V3D_DIRTY_RASTERIZER_SCISSOR)) {
                 float *vpscale = v3d->viewport.scale;
                 float *vptranslate = v3d->viewport.translate;
-                float vp_minx = -fabsf(vpscale[0]) + vptranslate[0];
-                float vp_maxx = fabsf(vpscale[0]) + vptranslate[0];
-                float vp_miny = -fabsf(vpscale[1]) + vptranslate[1];
-                float vp_maxy = fabsf(vpscale[1]) + vptranslate[1];
+                float vp_minx = ceilf(-fabsf(vpscale[0]) + vptranslate[0] - 0.5f);
+                float vp_maxx = ceilf(fabsf(vpscale[0]) + vptranslate[0] - 0.5f);
+                float vp_miny = ceilf(-fabsf(vpscale[1]) + vptranslate[1] - 0.5f);
+                float vp_maxy = ceilf(fabsf(vpscale[1]) + vptranslate[1] - 0.5f);
 
                 /* Clip to the scissor if it's enabled, but still clip to the
                  * drawable regardless since that controls where the binner
