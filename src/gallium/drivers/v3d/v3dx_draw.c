@@ -1912,9 +1912,15 @@ v3d_clear_render_target(struct pipe_context *pctx, struct pipe_surface *ps,
         if (render_condition_enabled && !v3d_render_condition_check(v3d))
                 return;
 
-        v3d_blitter_save(v3d, render_condition_enabled ?
-                         V3D_CLEAR_SURFACE_COND : V3D_CLEAR_SURFACE);
-        util_blitter_clear_render_target(v3d->blitter, ps, color, x, y, w, h);
+        struct pipe_surface layer = *ps;
+
+        for (unsigned i = ps->first_layer; i <= ps->last_layer; i++) {
+                layer.first_layer = layer.last_layer = i;
+                v3d_blitter_save(v3d, render_condition_enabled ?
+                                 V3D_CLEAR_SURFACE_COND : V3D_CLEAR_SURFACE);
+                util_blitter_clear_render_target(v3d->blitter, &layer, color,
+                                                 x, y, w, h);
+        }
 }
 
 static void
@@ -1928,10 +1934,15 @@ v3d_clear_depth_stencil(struct pipe_context *pctx, struct pipe_surface *ps,
         if (render_condition_enabled && !v3d_render_condition_check(v3d))
                 return;
 
-        v3d_blitter_save(v3d, render_condition_enabled ?
-                         V3D_CLEAR_SURFACE_COND : V3D_CLEAR_SURFACE);
-        util_blitter_clear_depth_stencil(v3d->blitter, ps, buffers, depth,
-                                         stencil, x, y, w, h);
+        struct pipe_surface layer = *ps;
+
+        for (unsigned i = ps->first_layer; i <= ps->last_layer; i++) {
+                layer.first_layer = layer.last_layer = i;
+                v3d_blitter_save(v3d, render_condition_enabled ?
+                                 V3D_CLEAR_SURFACE_COND : V3D_CLEAR_SURFACE);
+                util_blitter_clear_depth_stencil(v3d->blitter, &layer, buffers,
+                                                 depth, stencil, x, y, w, h);
+        }
 }
 
 static void
