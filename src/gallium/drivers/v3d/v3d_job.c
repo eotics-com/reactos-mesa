@@ -683,6 +683,13 @@ v3d_job_submit(struct v3d_context *v3d, struct v3d_job *job)
                 goto out_of_memory;
         if (!job->needs_flush)
                 goto done;
+        if (job->draw_width > devinfo->max_framebuffer_size ||
+            job->draw_height > devinfo->max_framebuffer_size) {
+                mesa_loge_once("A %ux%u frame exceeds the %u hardware framebuffer limit; not rendering it",
+                               job->draw_width, job->draw_height,
+                               devinfo->max_framebuffer_size);
+                goto done;
+        }
 
         /* The GL_PRIMITIVES_GENERATED query is included with
          * OES_geometry_shader.
