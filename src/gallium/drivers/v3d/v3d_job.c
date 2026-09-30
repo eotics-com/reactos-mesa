@@ -588,6 +588,8 @@ v3d_read_and_accumulate_primitive_counters(struct v3d_context *v3d)
                         uint32_t vertices_written =
                                 map[V3D_PRIM_COUNTS_TF_WRITTEN] * mesa_vertices_per_prim(prim_mode);
                         for (int i = 0; i < v3d->streamout.num_targets; i++) {
+                                if (!v3d->streamout.targets[i])
+                                        continue;
                                 v3d_stream_output_target(v3d->streamout.targets[i])->offset +=
                                         vertices_written;
                         }

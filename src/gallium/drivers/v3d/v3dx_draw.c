@@ -915,7 +915,8 @@ v3d_update_primitives_generated_counter(struct v3d_context *v3d,
         if (!v3d->active_queries)
                 return;
 
-        uint32_t prims = u_prims_for_vertices(info->mode, draw->count);
+        uint32_t prims = u_prims_for_vertices(info->mode, draw->count) *
+                         info->instance_count;
         v3d->prims_generated += prims;
 }
 
@@ -1439,9 +1440,13 @@ v3d_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
          * vertices were written.
          */
         if (!v3d->prog.gs && !v3d->prim_restart) {
-                for (int i = 0; i < v3d->streamout.num_targets; i++)
+                for (int i = 0; i < v3d->streamout.num_targets; i++) {
+                        if (!v3d->streamout.targets[i])
+                                continue;
                         v3d_stream_output_target(v3d->streamout.targets[i])->offset +=
-                                u_stream_outputs_for_vertices(info->mode, draws[0].count);
+                                u_stream_outputs_for_vertices(info->mode, draws[0].count) *
+                                info->instance_count;
+                }
         }
 
         v3d_update_job_tlb_load_store(job);

@@ -179,6 +179,8 @@ v3d_update_primitive_counters(struct v3d_context *v3d)
         uint32_t num_verts = u_vertices_for_prims(prim_type,
                                                   prims_after - prims_before);
         for (int i = 0; i < v3d->streamout.num_targets; i++) {
+                if (!v3d->streamout.targets[i])
+                        continue;
                 struct v3d_stream_output_target *so =
                         v3d_stream_output_target(v3d->streamout.targets[i]);
                 so->recorded_vertex_count += num_verts;
