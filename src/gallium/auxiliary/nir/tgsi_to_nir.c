@@ -58,6 +58,23 @@ struct ttn_reg_info {
    int offset;
 };
 
+#define TTN_MAX_CONSTRUCT_DEPTH 64
+
+struct ttn_switch {
+   nir_variable *selector;
+   nir_variable *fall;
+   nir_variable *cont;
+   nir_def *matched;
+   nir_def *labels;
+   bool if_open;
+   bool saw_cont;
+};
+
+struct ttn_case {
+   unsigned owner;
+   struct tgsi_full_src_register src;
+};
+
 struct ttn_compile {
    union tgsi_full_token *token;
    nir_builder build;
@@ -66,6 +83,7 @@ struct ttn_compile {
    struct ttn_reg_info *output_regs;
    struct ttn_reg_info *temp_regs;
    nir_def **imm_defs;
+   nir_variable *imm_array;
 
    unsigned num_samp_types;
    nir_alu_type *samp_types;
@@ -99,6 +117,14 @@ struct ttn_compile {
    bool cap_samplers_as_deref;
    bool cap_integers;
    bool cap_tg4_component_in_swizzle;
+
+   struct ttn_case *cases;
+   unsigned num_cases;
+   unsigned next_switch;
+   struct ttn_switch switches[TTN_MAX_CONSTRUCT_DEPTH];
+   unsigned switch_depth;
+   bool construct_is_switch[TTN_MAX_CONSTRUCT_DEPTH];
+   unsigned construct_depth;
 };
 
 #define ttn_swizzle(b, src, x, y, z, w) \
@@ -336,6 +362,14 @@ ttn_emit_declaration(struct ttn_compile *c)
                      tgsi_varying_semantic_to_slot(decl->Semantic.Name,
                                                    decl->Semantic.Index);
                }
+            } else if (c->scan->processor == MESA_SHADER_GEOMETRY) {
+               unsigned vertices_in = mesa_vertices_per_prim(
+                  c->scan->properties[TGSI_PROPERTY_GS_INPUT_PRIM]);
+
+               var->data.location =
+                  tgsi_varying_semantic_to_slot(decl->Semantic.Name,
+                                                decl->Semantic.Index);
+               var->type = glsl_array_type(var->type, vertices_in, 0);
             } else {
                assert(!decl->Declaration.Semantic);
                var->data.location = VERT_ATTRIB_GENERIC0 + idx;
@@ -505,6 +539,27 @@ ttn_array_deref(struct ttn_compile *c, nir_variable *var, unsigned offset,
    return nir_build_deref_array(&c->build, deref, index);
 }
 
+static nir_variable *
+ttn_immediate_array(struct ttn_compile *c)
+{
+   if (!c->imm_array) {
+      nir_builder b = nir_builder_at(nir_before_impl(c->build.impl));
+
+      c->imm_array =
+         nir_variable_create(c->build.shader, nir_var_shader_temp,
+                             glsl_array_type(glsl_vec4_type(), c->next_imm, 0),
+                             "imm_array");
+      for (unsigned i = 0; i < c->next_imm; i++) {
+         nir_load_const_instr *imm = nir_def_as_load_const(c->imm_defs[i]);
+         nir_deref_instr *deref =
+            nir_build_deref_array_imm(&b, nir_build_deref_var(&b, c->imm_array), i);
+
+         nir_store_deref(&b, deref, nir_build_imm(&b, 4, 32, imm->value), 0xf);
+      }
+   }
+   return c->imm_array;
+}
+
 /* Special case: Turn the frontface varying into a load of the
  * frontface variable, and create the vector as required by TGSI.
  */
@@ -581,9 +636,14 @@ ttn_src_for_file_and_index(struct ttn_compile *c, unsigned file, unsigned index,
       break;
 
    case TGSI_FILE_IMMEDIATE:
-      src = nir_src_for_ssa(c->imm_defs[index]);
-      assert(!indirect);
       assert(!dim);
+      if (indirect) {
+         nir_variable *var = ttn_immediate_array(c);
+
+         src = nir_src_for_ssa(nir_load_deref(b, ttn_array_deref(c, var, index, indirect)));
+         break;
+      }
+      src = nir_src_for_ssa(c->imm_defs[index]);
       break;
 
    case TGSI_FILE_SYSTEM_VALUE: {
@@ -633,6 +693,12 @@ ttn_src_for_file_and_index(struct ttn_compile *c, unsigned file, unsigned index,
          load = nir_load_sample_id(b);
          b->shader->info.fs.uses_sample_shading = true;
          break;
+      case TGSI_SEMANTIC_PRIMID:
+         load = nir_load_primitive_id(b);
+         break;
+      case TGSI_SEMANTIC_INVOCATIONID:
+         load = nir_load_invocation_id(b);
+         break;
       default:
          UNREACHABLE("bad system value");
       }
@@ -659,12 +725,36 @@ ttn_src_for_file_and_index(struct ttn_compile *c, unsigned file, unsigned index,
           c->scan->input_semantic_name[index] == TGSI_SEMANTIC_PCOORD) {
          assert(!c->cap_point_is_sysval && c->input_var_point);
          return nir_src_for_ssa(nir_load_var(&c->build, c->input_var_point));
+      } else if (c->scan->processor == MESA_SHADER_GEOMETRY && dim) {
+         nir_def *vertex = dimind ?
+            nir_iadd_imm(b, ttn_src_for_indirect(c, dimind), dim->Index) :
+            nir_imm_int(b, dim->Index);
+         nir_deref_instr *deref = nir_build_deref_var(&c->build,
+                                                      c->inputs[index]);
+         deref = nir_build_deref_array(&c->build, deref, vertex);
+         return nir_src_for_ssa(nir_load_deref(&c->build, deref));
       } else {
          /* Indirection on input arrays isn't supported by TTN. */
          assert(!dim);
          nir_deref_instr *deref = nir_build_deref_var(&c->build,
                                                       c->inputs[index]);
-         return nir_src_for_ssa(nir_load_deref(&c->build, deref));
+         nir_def *load = nir_load_deref(&c->build, deref);
+
+         if (indirect) {
+            nir_def *addr = nir_iadd_imm(b, ttn_src_for_indirect(c, indirect),
+                                         index);
+
+            for (unsigned i = 0; i < b->shader->num_inputs; i++) {
+               nir_variable *var = c->inputs[i];
+
+               if (i == index || !var || var->data.mode != nir_var_shader_in ||
+                   var->type != glsl_vec4_type())
+                  continue;
+               load = nir_bcsel(b, nir_ieq_imm(b, addr, i),
+                                nir_load_var(b, var), load);
+            }
+         }
+         return nir_src_for_ssa(load);
       }
       break;
 
@@ -2132,6 +2222,71 @@ static const nir_op op_trans[TGSI_OPCODE_LAST] = {
 };
 
 static void
+ttn_add_output_stores(struct ttn_compile *c);
+
+static nir_def *
+ttn_case_value(struct ttn_compile *c, const struct tgsi_full_src_register *src)
+{
+   nir_src value = ttn_src_for_file_and_index(c, src->Register.File,
+                                              src->Register.Index,
+                                              NULL, NULL, NULL, false);
+
+   return nir_channel(&c->build, value.ssa, src->Register.SwizzleX);
+}
+
+static void
+ttn_emit_continue(struct ttn_compile *c)
+{
+   nir_builder *b = &c->build;
+
+   if (c->construct_depth &&
+       c->construct_is_switch[c->construct_depth - 1]) {
+      struct ttn_switch *sw = &c->switches[c->switch_depth - 1];
+
+      sw->saw_cont = true;
+      nir_store_var(b, sw->cont, nir_imm_true(b), 1);
+      nir_jump(b, nir_jump_break);
+   } else {
+      nir_jump(b, nir_jump_continue);
+   }
+}
+
+static void
+ttn_open_case_labels(struct ttn_compile *c, unsigned tgsi_op)
+{
+   nir_builder *b = &c->build;
+   struct ttn_switch *sw;
+
+   if (!c->switch_depth)
+      return;
+
+   sw = &c->switches[c->switch_depth - 1];
+   if (tgsi_op == TGSI_OPCODE_CASE || tgsi_op == TGSI_OPCODE_DEFAULT ||
+       tgsi_op == TGSI_OPCODE_ENDSWITCH) {
+      if (sw->if_open) {
+         nir_pop_if(b, NULL);
+         sw->if_open = false;
+      }
+      return;
+   }
+   if (!sw->labels)
+      return;
+
+   nir_push_if(b, nir_ior(b, nir_load_var(b, sw->fall), sw->labels));
+   nir_store_var(b, sw->fall, nir_imm_true(b), 1);
+   sw->labels = NULL;
+   sw->if_open = true;
+}
+
+static unsigned
+ttn_stream_id(nir_def *src)
+{
+   nir_scalar stream = nir_scalar_resolved(src, 0);
+
+   return nir_scalar_is_const(stream) ? nir_scalar_as_uint(stream) : 0;
+}
+
+static void
 ttn_emit_instruction(struct ttn_compile *c)
 {
    nir_builder *b = &c->build;
@@ -2142,6 +2297,8 @@ ttn_emit_instruction(struct ttn_compile *c)
 
    if (tgsi_op == TGSI_OPCODE_END)
       return;
+
+   ttn_open_case_labels(c, tgsi_op);
 
    nir_def *src[TGSI_FULL_MAX_SRC_REGISTERS];
    for (i = 0; i < tgsi_inst->Instruction.NumSrcRegs; i++) {
@@ -2324,6 +2481,8 @@ ttn_emit_instruction(struct ttn_compile *c)
       break;
 
    case TGSI_OPCODE_BGNLOOP:
+      assert(c->construct_depth < TTN_MAX_CONSTRUCT_DEPTH);
+      c->construct_is_switch[c->construct_depth++] = false;
       nir_loop_add_continue_construct(nir_push_loop(&c->build));
       break;
 
@@ -2332,12 +2491,76 @@ ttn_emit_instruction(struct ttn_compile *c)
       break;
 
    case TGSI_OPCODE_CONT:
-      nir_jump(b, nir_jump_continue);
+      ttn_emit_continue(c);
       break;
 
    case TGSI_OPCODE_ENDLOOP:
+      assert(c->construct_depth);
+      c->construct_depth--;
       nir_pop_loop(&c->build, NULL);
       break;
+
+   case TGSI_OPCODE_SWITCH: {
+      unsigned ordinal = c->next_switch++;
+      nir_def *selector = nir_channel(b, src[0], 0);
+      nir_def *matched = nir_imm_false(b);
+      struct ttn_switch *sw;
+
+      assert(c->switch_depth < TTN_MAX_CONSTRUCT_DEPTH &&
+             c->construct_depth < TTN_MAX_CONSTRUCT_DEPTH);
+      sw = &c->switches[c->switch_depth++];
+      c->construct_is_switch[c->construct_depth++] = true;
+
+      for (unsigned i = 0; i < c->num_cases; i++) {
+         if (c->cases[i].owner == ordinal)
+            matched = nir_ior(b, matched,
+                              nir_ieq(b, selector,
+                                      ttn_case_value(c, &c->cases[i].src)));
+      }
+
+      sw->selector = nir_local_variable_create(b->impl, glsl_uint_type(), "switch_selector");
+      sw->fall = nir_local_variable_create(b->impl, glsl_bool_type(), "switch_fall");
+      sw->cont = nir_local_variable_create(b->impl, glsl_bool_type(), "switch_continue");
+      nir_store_var(b, sw->selector, selector, 1);
+      nir_store_var(b, sw->fall, nir_imm_false(b), 1);
+      nir_store_var(b, sw->cont, nir_imm_false(b), 1);
+      sw->matched = matched;
+      sw->labels = NULL;
+      sw->if_open = false;
+      sw->saw_cont = false;
+      nir_push_loop(b);
+      break;
+   }
+
+   case TGSI_OPCODE_CASE:
+   case TGSI_OPCODE_DEFAULT: {
+      struct ttn_switch *sw = &c->switches[c->switch_depth - 1];
+      nir_def *label;
+
+      assert(c->switch_depth);
+      if (tgsi_op == TGSI_OPCODE_CASE)
+         label = nir_ieq(b, nir_load_var(b, sw->selector), nir_channel(b, src[0], 0));
+      else
+         label = nir_inot(b, sw->matched);
+      sw->labels = sw->labels ? nir_ior(b, sw->labels, label) : label;
+      break;
+   }
+
+   case TGSI_OPCODE_ENDSWITCH: {
+      struct ttn_switch *sw = &c->switches[c->switch_depth - 1];
+
+      assert(c->switch_depth && c->construct_depth);
+      nir_jump(b, nir_jump_break);
+      nir_pop_loop(b, NULL);
+      c->switch_depth--;
+      c->construct_depth--;
+      if (sw->saw_cont && c->construct_depth) {
+         nir_push_if(b, nir_load_var(b, sw->cont));
+         ttn_emit_continue(c);
+         nir_pop_if(b, NULL);
+      }
+      break;
+   }
 
    case TGSI_OPCODE_BARRIER:
       ttn_barrier(b);
@@ -2357,6 +2580,15 @@ ttn_emit_instruction(struct ttn_compile *c)
 
    case TGSI_OPCODE_DDY_FINE:
       dst = nir_ddy_fine(b, src[0]);
+      break;
+
+   case TGSI_OPCODE_EMIT:
+      ttn_add_output_stores(c);
+      nir_emit_vertex(b, ttn_stream_id(src[0]));
+      break;
+
+   case TGSI_OPCODE_ENDPRIM:
+      nir_end_primitive(b, ttn_stream_id(src[0]));
       break;
 
    case TGSI_OPCODE_RET:
@@ -2516,6 +2748,49 @@ ttn_add_output_stores(struct ttn_compile *c)
  * Parses the given TGSI tokens.
  */
 static void
+ttn_scan_switch_cases(struct ttn_compile *c, const void *tgsi_tokens)
+{
+   struct tgsi_parse_context parser;
+   unsigned stack[TTN_MAX_CONSTRUCT_DEPTH];
+   unsigned depth = 0, switches = 0, capacity = 0;
+   ASSERTED int ret;
+
+   ret = tgsi_parse_init(&parser, tgsi_tokens);
+   assert(ret == TGSI_PARSE_OK);
+
+   while (!tgsi_parse_end_of_tokens(&parser)) {
+      tgsi_parse_token(&parser);
+      if (parser.FullToken.Token.Type != TGSI_TOKEN_TYPE_INSTRUCTION)
+         continue;
+
+      switch (parser.FullToken.FullInstruction.Instruction.Opcode) {
+      case TGSI_OPCODE_SWITCH:
+         assert(depth < TTN_MAX_CONSTRUCT_DEPTH);
+         stack[depth++] = switches++;
+         break;
+      case TGSI_OPCODE_CASE:
+         assert(depth);
+         if (c->num_cases == capacity) {
+            capacity = MAX2(16, capacity * 2);
+            c->cases = reralloc(c, c->cases, struct ttn_case, capacity);
+         }
+         c->cases[c->num_cases].owner = stack[depth - 1];
+         c->cases[c->num_cases].src = parser.FullToken.FullInstruction.Src[0];
+         c->num_cases++;
+         break;
+      case TGSI_OPCODE_ENDSWITCH:
+         assert(depth);
+         depth--;
+         break;
+      default:
+         break;
+      }
+   }
+
+   tgsi_parse_free(&parser);
+}
+
+static void
 ttn_parse_tgsi(struct ttn_compile *c, const void *tgsi_tokens)
 {
    struct tgsi_parse_context parser;
@@ -2534,11 +2809,6 @@ ttn_parse_tgsi(struct ttn_compile *c, const void *tgsi_tokens)
          break;
 
       case TGSI_TOKEN_TYPE_INSTRUCTION:
-         if (parser.FullToken.FullInstruction.Instruction.Opcode == TGSI_OPCODE_RET) {
-            /* We have to be conservative and add output stores before each return.
-             * Hopefully stores will be optimized out later if not actually required */
-            ttn_add_output_stores(c);
-         }
          ttn_emit_instruction(c);
          break;
 
@@ -2681,6 +2951,24 @@ ttn_compile_init(const void *tgsi_tokens,
       case TGSI_PROPERTY_LEGACY_MATH_RULES:
          s->info.use_legacy_math_rules = value;
          break;
+      case TGSI_PROPERTY_GS_INPUT_PRIM:
+         if (s->info.stage == MESA_SHADER_GEOMETRY) {
+            s->info.gs.input_primitive = value;
+            s->info.gs.vertices_in = mesa_vertices_per_prim(value);
+         }
+         break;
+      case TGSI_PROPERTY_GS_OUTPUT_PRIM:
+         if (s->info.stage == MESA_SHADER_GEOMETRY)
+            s->info.gs.output_primitive = value;
+         break;
+      case TGSI_PROPERTY_GS_MAX_OUTPUT_VERTICES:
+         if (s->info.stage == MESA_SHADER_GEOMETRY)
+            s->info.gs.vertices_out = value;
+         break;
+      case TGSI_PROPERTY_GS_INVOCATIONS:
+         if (s->info.stage == MESA_SHADER_GEOMETRY)
+            s->info.gs.invocations = value;
+         break;
       default:
          if (value) {
             fprintf(stderr, "tgsi_to_nir: unhandled TGSI property %u = %u\n",
@@ -2711,8 +2999,13 @@ ttn_compile_init(const void *tgsi_tokens,
    c->num_samp_types = scan.file_max[TGSI_FILE_SAMPLER_VIEW] + 1;
    c->samp_types = rzalloc_array(c, nir_alu_type, c->num_samp_types);
 
+   ttn_scan_switch_cases(c, tgsi_tokens);
    ttn_parse_tgsi(c, tgsi_tokens);
-   ttn_add_output_stores(c);
+   if (s->info.stage != MESA_SHADER_GEOMETRY) {
+      nir_lower_returns_impl(c->build.impl);
+      c->build.cursor = nir_after_impl(c->build.impl);
+      ttn_add_output_stores(c);
+   }
 
    nir_validate_shader(c->build.shader, "TTN: after parsing TGSI and creating the NIR shader");
 
