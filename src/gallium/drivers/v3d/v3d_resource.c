@@ -981,6 +981,11 @@ v3d_setup_slices(struct v3d_screen *screen, struct v3d_resource *rsc,
                         slice->stride = winsys_stride;
                 else
                         slice->stride = level_width * rsc->cpp;
+#ifdef _WIN32
+                if (!winsys_stride && slice->tiling == V3D_TILING_RASTER &&
+                    (prsc->bind & PIPE_BIND_SCANOUT))
+                        slice->stride = align(slice->stride, 64);
+#endif
 
 #if USE_V3D_SIMULATOR
                 /* Ensure stride alignment matches the one required by the GPU

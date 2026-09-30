@@ -92,6 +92,8 @@ d3d10_create_resource(struct pipe_screen *screen,
    private_data.Flags = desc->Primary ? RPI5VC4_RESOURCE_FLAG_PRIMARY : 0;
    private_data.PrimaryVidPnSourceId = desc->Primary ?
       desc->PrimaryVidPnSourceId : RPI5VC4_RESOURCE_INVALID_VIDPN_SOURCE;
+   if (desc->Primary)
+      private_data.Stride = align(desc->Width * 4, 64);
    private_data.Layout =
       templ->target == PIPE_BUFFER ||
       templ->target == PIPE_TEXTURE_1D ||
