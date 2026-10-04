@@ -627,7 +627,7 @@ static VkResult pvr_drm_setup_heaps(struct pvr_drm_winsys *const drm_ws)
        */
       p_atomic_set(&winsys_heaps[i]->ref_count, 0);
 
-      if (pthread_mutex_init(&winsys_heaps[i]->lock, NULL)) {
+      if (mtx_init(&winsys_heaps[i]->lock, mtx_plain) != thrd_success) {
          result = vk_error(NULL, VK_ERROR_INITIALIZATION_FAILED);
          goto err_pvr_drm_heap_finish_all_heaps;
       }

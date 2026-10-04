@@ -12,7 +12,9 @@
 
 #include "pvr_physical_device.h"
 
+#ifndef _WIN32
 #include <sys/sysmacros.h>
+#endif
 
 #include "git_sha1.h"
 
@@ -191,7 +193,9 @@ static void pvr_physical_device_get_supported_extensions(
       .EXT_depth_clip_enable = true,
       .EXT_device_memory_report = true,
       .EXT_display_control = PVR_USE_WSI_PLATFORM_DISPLAY,
+#if DETECT_OS_LINUX || DETECT_OS_BSD
       .EXT_image_drm_format_modifier = true,
+#endif
       .EXT_extended_dynamic_state = true,
       .EXT_extended_dynamic_state2 = true,
       .EXT_extended_dynamic_state3 = true,
@@ -202,7 +206,9 @@ static void pvr_physical_device_get_supported_extensions(
       .EXT_line_rasterization = true,
       .EXT_map_memory_placed = true,
       .EXT_non_seamless_cube_map = true,
+#ifndef _WIN32
       .EXT_physical_device_drm = true,
+#endif
       .EXT_private_data = true,
       .EXT_provoking_vertex = true,
       .EXT_queue_family_foreign = true,
@@ -933,6 +939,7 @@ static bool pvr_physical_device_get_properties(
       .maxCustomBorderColorSamplers =
          get_custom_border_color_samplers(&pdevice->dev_info),
 
+#ifndef _WIN32
       /* VK_EXT_physical_device_drm */
       .drmHasPrimary = pdevice->has_primary,
       .drmPrimaryMajor = (int64_t) major(pdevice->primary_devid),
@@ -940,6 +947,7 @@ static bool pvr_physical_device_get_properties(
       .drmHasRender = true,
       .drmRenderMajor = (int64_t) major(pdevice->render_devid),
       .drmRenderMinor = (int64_t) minor(pdevice->render_devid),
+#endif
 
       /* Vulkan 1.2 / VK_KHR_depth_stencil_resolve */
       .supportedDepthResolveModes =
@@ -1089,8 +1097,10 @@ VkResult pvr_physical_device_init(struct pvr_physical_device *pdevice,
    struct vk_properties supported_properties;
    struct vk_features supported_features;
    struct pvr_winsys *ws;
+#ifndef _WIN32
    struct stat primary_stat = { 0 }, render_stat = { 0 };
    char *primary_path;
+#endif
    char *display_path;
    char *render_path;
    VkResult result;
@@ -1115,9 +1125,10 @@ VkResult pvr_physical_device_init(struct pvr_physical_device *pdevice,
       display_path = NULL;
    }
 
-   primary_path = drm_render_device->nodes[DRM_NODE_PRIMARY];
    pdevice->has_primary = false;
    pdevice->primary_devid = 0;
+#ifndef _WIN32
+   primary_path = drm_render_device->nodes[DRM_NODE_PRIMARY];
    if (!stat(primary_path, &primary_stat)) {
       pdevice->has_primary = true;
       pdevice->primary_devid = primary_stat.st_rdev;
@@ -1131,6 +1142,7 @@ VkResult pvr_physical_device_init(struct pvr_physical_device *pdevice,
       goto err_vk_free_display_path;
    }
    pdevice->render_devid = render_stat.st_rdev;
+#endif
 
    result =
       pvr_winsys_create(render_path, display_path, true,

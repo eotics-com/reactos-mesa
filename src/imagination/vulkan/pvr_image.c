@@ -65,7 +65,9 @@ static void pvr_image_init_memlayout(struct pvr_image *image)
       break;
    case VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT:
       /* Support only LINEAR now */
+#if DETECT_OS_LINUX || DETECT_OS_BSD
       assert(image->vk.drm_format_mod == DRM_FORMAT_MOD_LINEAR);
+#endif
       image->memlayout = PVR_MEMLAYOUT_LINEAR;
       break;
    }
@@ -307,6 +309,7 @@ void pvr_image_init(struct pvr_device *device,
    image->plane_count = vk_format_get_plane_count(image->vk.format);
    image->alignment = device->pdevice->ws->page_size;
 
+#if DETECT_OS_LINUX || DETECT_OS_BSD
    if (pCreateInfo->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
       VkResult res = pvr_pick_modifier(pCreateInfo,
                                        pbe_stride_align,
@@ -316,6 +319,7 @@ void pvr_image_init(struct pvr_device *device,
 
       assert(image->vk.drm_format_mod == DRM_FORMAT_MOD_LINEAR);
    }
+#endif
 
    pvr_image_init_memlayout(image);
    pvr_image_init_physical_extent(image, pCreateInfo, pbe_stride_align);

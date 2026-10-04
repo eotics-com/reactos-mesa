@@ -14,8 +14,7 @@
 #ifndef PVR_FRAMEBUFFER_H
 #define PVR_FRAMEBUFFER_H
 
-#include <pthread.h>
-
+#include "c11/threads.h"
 #include "util/list.h"
 
 #include "vk_object.h"
@@ -26,7 +25,7 @@
 struct pvr_render_target {
    struct pvr_rt_dataset *rt_dataset[PVR_MAX_MULTIVIEW];
 
-   pthread_mutex_t mutex;
+   mtx_t mutex;
 
    uint32_t valid_mask;
 };

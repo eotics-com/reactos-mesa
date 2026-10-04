@@ -87,7 +87,7 @@ static inline VkResult pvr_mmap(void *addr,
                                 const int prot,
                                 int flags,
                                 const int fd,
-                                const off_t offset,
+                                const uint64_t offset,
                                 void **const map_out)
 {
    if (addr)

@@ -79,7 +79,7 @@ bool pvr_winsys_helper_winsys_heap_finish(struct pvr_winsys_heap *const heap)
    if (p_atomic_read(&heap->ref_count) != 0)
       return false;
 
-   pthread_mutex_destroy(&heap->lock);
+   mtx_destroy(&heap->lock);
    util_vma_heap_finish(&heap->vma_heap);
 
    return true;
@@ -107,10 +107,10 @@ VkResult pvr_winsys_helper_heap_alloc(struct pvr_winsys_heap *const heap,
    size = ALIGN_POT(size, alignment);
    vma.size = size;
 
-   pthread_mutex_lock(&heap->lock);
+   mtx_lock(&heap->lock);
    vma.dev_addr =
       PVR_DEV_ADDR(util_vma_heap_alloc(&heap->vma_heap, size, heap->page_size));
-   pthread_mutex_unlock(&heap->lock);
+   mtx_unlock(&heap->lock);
 
    if (!vma.dev_addr.addr)
       return vk_error(NULL, VK_ERROR_OUT_OF_DEVICE_MEMORY);
@@ -129,9 +129,9 @@ void pvr_winsys_helper_heap_free(struct pvr_winsys_vma *const vma)
    /* A vma with an existing device mapping should not be freed. */
    assert(!vma->bo);
 
-   pthread_mutex_lock(&heap->lock);
+   mtx_lock(&heap->lock);
    util_vma_heap_free(&heap->vma_heap, vma->dev_addr.addr, vma->size);
-   pthread_mutex_unlock(&heap->lock);
+   mtx_unlock(&heap->lock);
 
    p_atomic_dec(&heap->ref_count);
 }

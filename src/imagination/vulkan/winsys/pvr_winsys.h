@@ -28,12 +28,18 @@
 #ifndef PVR_WINSYS_H
 #define PVR_WINSYS_H
 
-#include <pthread.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <vulkan/vulkan.h>
+#include <xf86drm.h>
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
+#include "c11/threads.h"
 #include "hwdef/rogue_hw_defs.h"
 #include "pvr_limits.h"
 #include "pvr_rogue_fw.h"
@@ -79,7 +85,7 @@ struct pvr_winsys_heap {
 
    struct util_vma_heap vma_heap;
    int ref_count;
-   pthread_mutex_t lock;
+   mtx_t lock;
 
    /* These are the offsets from the base at which static data might be
     * uploaded. Some of these might be invalid since the kernel might not
@@ -479,5 +485,23 @@ VkResult pvr_winsys_create(const char *render_path,
                            bool keep_display_master,
                            const VkAllocationCallbacks *alloc,
                            struct pvr_winsys **ws_out);
+
+static inline int pvr_winsys_open_node(const char *path)
+{
+#ifdef _WIN32
+   return pvrkmt_open(path, DRM_RDWR | DRM_CLOEXEC);
+#else
+   return open(path, O_RDWR | O_CLOEXEC);
+#endif
+}
+
+static inline void pvr_winsys_close_node(int fd)
+{
+#ifdef _WIN32
+   pvrkmt_close(fd);
+#else
+   close(fd);
+#endif
+}
 
 #endif /* PVR_WINSYS_H */

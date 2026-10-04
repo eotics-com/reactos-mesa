@@ -975,7 +975,7 @@ void pvr_render_targets_fini(struct pvr_render_target *render_targets,
 {
    for (uint32_t i = 0; i < render_targets_count; i++) {
       pvr_render_targets_datasets_destroy(&render_targets[i]);
-      pthread_mutex_destroy(&render_targets[i].mutex);
+      mtx_destroy(&render_targets[i].mutex);
    }
 }
 

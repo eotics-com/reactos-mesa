@@ -3214,7 +3214,7 @@ static inline VkResult pvr_render_targets_datasets_create(
    const uint32_t layers =
       PVR_HAS_FEATURE(dev_info, gs_rta_support) ? rstate->layers : 1;
 
-   pthread_mutex_lock(&render_target->mutex);
+   mtx_lock(&render_target->mutex);
 
    u_foreach_bit (view_idx, hw_render->view_mask) {
       struct pvr_rt_dataset *rt_dataset;
@@ -3231,7 +3231,7 @@ static inline VkResult pvr_render_targets_datasets_create(
                                                      &rt_dataset);
       if (result != VK_SUCCESS) {
          pvr_render_targets_datasets_destroy(render_target);
-         pthread_mutex_unlock(&render_target->mutex);
+         mtx_unlock(&render_target->mutex);
          return result;
       }
 
@@ -3239,7 +3239,7 @@ static inline VkResult pvr_render_targets_datasets_create(
       render_target->rt_dataset[view_idx] = rt_dataset;
    }
 
-   pthread_mutex_unlock(&render_target->mutex);
+   mtx_unlock(&render_target->mutex);
 
    return VK_SUCCESS;
 }

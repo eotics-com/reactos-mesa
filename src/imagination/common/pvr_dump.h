@@ -207,7 +207,11 @@ static inline void pvr_dump_begin(struct pvr_dump_ctx *const root_ctx,
 {
    __pvr_dump_ctx_init(root_ctx, NULL, file, name, max_depth, 0);
 
+#ifdef _WIN32
+   _lock_file(file);
+#else
    flockfile(file);
+#endif
    pvr_dump_println(root_ctx, "======= BEGIN %s =======", name);
 }
 
@@ -223,7 +227,11 @@ static inline bool pvr_dump_end(struct pvr_dump_ctx *const root_ctx)
       return pvr_dump_error(root_ctx, "ending non-root context");
 
    pvr_dump_println(root_ctx, "======= END %s =======", root_ctx->name);
+#ifdef _WIN32
+   _unlock_file(root_ctx->file);
+#else
    funlockfile(root_ctx->file);
+#endif
 
    __pvr_dump_ctx_mark_popped(root_ctx);
 

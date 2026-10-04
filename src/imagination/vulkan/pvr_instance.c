@@ -12,7 +12,6 @@
 
 #include "pvr_instance.h"
 
-#include <fcntl.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -22,6 +21,7 @@
 #include "wsi_common.h"
 
 #include "util/build_id.h"
+#include "util/disk_cache.h"
 #include "util/os_misc.h"
 #include "pvr_drirc.h"
 
@@ -92,7 +92,7 @@ pvr_drm_device_is_compatible(drmDevicePtr drm_dev)
    bool is_pvr;
    int32_t fd;
 
-   fd = open(drm_dev->nodes[DRM_NODE_RENDER], O_RDWR | O_CLOEXEC);
+   fd = pvr_winsys_open_node(drm_dev->nodes[DRM_NODE_RENDER]);
    if (fd < 0) {
       mesa_logd("Failed to open render node: %s\n",
                 drm_dev->nodes[DRM_NODE_RENDER]);
@@ -105,7 +105,7 @@ pvr_drm_device_is_compatible(drmDevicePtr drm_dev)
       mesa_logd("Failed to get version information for render node: %s\n",
                 drm_dev->nodes[DRM_NODE_RENDER]);
 
-      close(fd);
+      pvr_winsys_close_node(fd);
       return false;
    }
 
@@ -116,7 +116,7 @@ pvr_drm_device_is_compatible(drmDevicePtr drm_dev)
 #endif /* defined(PVR_SUPPORT_SERVICES_DRIVER) */
 
    drmFreeVersion(version);
-   close(fd);
+   pvr_winsys_close_node(fd);
 
    return is_pvr;
 }
@@ -130,7 +130,7 @@ static bool pvr_drm_device_is_compatible_display(drmDevicePtr drm_dev)
 
    mesa_logd("Checking DRM primary node for compatibility: %s",
              drm_dev->nodes[DRM_NODE_PRIMARY]);
-   fd = open(drm_dev->nodes[DRM_NODE_PRIMARY], O_RDWR | O_CLOEXEC);
+   fd = pvr_winsys_open_node(drm_dev->nodes[DRM_NODE_PRIMARY]);
    if (fd < 0) {
       mesa_logd("Failed to open display node: %s\n",
                 drm_dev->nodes[DRM_NODE_PRIMARY]);
@@ -167,7 +167,7 @@ static bool pvr_drm_device_is_compatible_display(drmDevicePtr drm_dev)
    ret = true;
 
 out:
-   close(fd);
+   pvr_winsys_close_node(fd);
    return ret;
 }
 
@@ -301,6 +301,20 @@ out:
 static bool
 pvr_get_driver_build_sha(struct pvr_instance *instance)
 {
+#ifdef _WIN32
+   blake3_hasher ctx;
+
+   _mesa_blake3_init(&ctx);
+   if (!disk_cache_get_function_identifier(pvr_get_driver_build_sha, &ctx)) {
+      mesa_loge("Failed to identify the driver build.");
+      return false;
+   }
+
+   STATIC_ASSERT(sizeof(instance->driver_build_sha) == BLAKE3_KEY_LEN);
+   _mesa_blake3_final(&ctx, instance->driver_build_sha);
+
+   return true;
+#else
    const struct build_id_note *note;
    unsigned build_id_len;
 
@@ -320,6 +334,7 @@ pvr_get_driver_build_sha(struct pvr_instance *instance)
    copy_build_id_to_sha1(instance->driver_build_sha, note);
 
    return true;
+#endif
 }
 
 static void pvr_init_dri_options(struct pvr_instance *instance)

@@ -21,7 +21,6 @@
  * SOFTWARE.
  */
 
-#include <fcntl.h>
 #include <stdbool.h>
 #include <vulkan/vulkan.h>
 #include <xf86drm.h>
@@ -42,10 +41,10 @@ void pvr_winsys_destroy(struct pvr_winsys *ws)
    ws->ops->destroy(ws);
 
    if (display_fd >= 0)
-      close(display_fd);
+      pvr_winsys_close_node(display_fd);
 
    if (render_fd >= 0)
-      close(render_fd);
+      pvr_winsys_close_node(render_fd);
 }
 
 VkResult pvr_winsys_create(const char *render_path,
@@ -59,7 +58,7 @@ VkResult pvr_winsys_create(const char *render_path,
    int display_fd;
    int render_fd;
 
-   render_fd = open(render_path, O_RDWR | O_CLOEXEC);
+   render_fd = pvr_winsys_open_node(render_path);
    if (render_fd < 0) {
       result = vk_errorf(NULL,
                          VK_ERROR_INITIALIZATION_FAILED,
@@ -69,7 +68,7 @@ VkResult pvr_winsys_create(const char *render_path,
    }
 
    if (display_path) {
-      display_fd = open(display_path, O_RDWR | O_CLOEXEC);
+      display_fd = pvr_winsys_open_node(display_path);
       if (display_fd < 0) {
          result = vk_errorf(NULL,
                             VK_ERROR_INITIALIZATION_FAILED,
@@ -117,10 +116,10 @@ VkResult pvr_winsys_create(const char *render_path,
 
 err_close_display_fd:
    if (display_fd >= 0)
-      close(display_fd);
+      pvr_winsys_close_node(display_fd);
 
 err_close_render_fd:
-   close(render_fd);
+   pvr_winsys_close_node(render_fd);
 
 err_out:
    return result;

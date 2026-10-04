@@ -79,7 +79,7 @@ static bool pvr_render_targets_init(struct pvr_render_target *render_targets,
    uint32_t i;
 
    for (i = 0; i < render_targets_count; i++) {
-      if (pthread_mutex_init(&render_targets[i].mutex, NULL))
+      if (mtx_init(&render_targets[i].mutex, mtx_plain) != thrd_success)
          goto err_mutex_destroy;
    }
 
@@ -87,7 +87,7 @@ static bool pvr_render_targets_init(struct pvr_render_target *render_targets,
 
 err_mutex_destroy:
    while (i--)
-      pthread_mutex_destroy(&render_targets[i].mutex);
+      mtx_destroy(&render_targets[i].mutex);
 
    return false;
 }
