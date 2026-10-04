@@ -3966,7 +3966,7 @@ zink_update_descriptor_refs(struct zink_context *ctx, bool compute)
          update_resource_refs_for_stage(ctx, i);
       unsigned vertex_buffers_enabled_mask = ctx->gfx_pipeline_state.vertex_buffers_enabled_mask;
       unsigned last_vbo = util_last_bit(vertex_buffers_enabled_mask);
-      for (unsigned i = 0; i < last_vbo + 1; i++) {
+      for (unsigned i = 0; i < last_vbo; i++) {
          struct zink_resource *res = zink_resource(ctx->vertex_buffers[i].buffer.resource);
          if (res) {
             zink_batch_resource_usage_set(ctx->bs, res, false, true);
