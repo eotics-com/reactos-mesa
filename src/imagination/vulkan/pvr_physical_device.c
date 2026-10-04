@@ -115,7 +115,7 @@ void pvr_physical_device_free_pipeline_cache(
    disk_cache_destroy(pdevice->vk.disk_cache);
    pdevice->vk.disk_cache = NULL;
 #else
-   assert(pdevice->vk.disk_cache);
+   assert(!pdevice->vk.disk_cache);
 #endif /* ENABLE_SHADER_CACHE */
 }
 
