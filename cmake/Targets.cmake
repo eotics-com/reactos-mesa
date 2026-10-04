@@ -197,6 +197,11 @@ if(MESA_PROFILE STREQUAL "arm64" OR MESA_PROFILE STREQUAL "arm64ec" OR MESA_PROF
         "${PROJECT_SOURCE_DIR}/src/util/cache_ops_aarch64.c"
     )
 endif()
+if(MESA_PROFILE STREQUAL "riscv64")
+    target_sources(mesa_util PRIVATE
+        "${PROJECT_SOURCE_DIR}/src/util/cache_ops_null.c"
+    )
+endif()
 target_include_directories(mesa_util PRIVATE
     "${PROJECT_BINARY_DIR}/src/util"
     "${PROJECT_SOURCE_DIR}/src/util"
@@ -1814,7 +1819,7 @@ if(NOT MESA_LLVMPIPE)
             "${MESA_REACTOS_SOURCE_DIR}/sdk/include/reactos/libs/zlib"
         )
     endif()
-    if(MESA_PROFILE STREQUAL "arm64" OR MESA_PROFILE STREQUAL "arm64ec" OR MESA_PROFILE STREQUAL "i386" OR MESA_PROFILE STREQUAL "amd64")
+    if(MESA_PROFILE STREQUAL "arm64" OR MESA_PROFILE STREQUAL "arm64ec" OR MESA_PROFILE STREQUAL "i386" OR MESA_PROFILE STREQUAL "amd64" OR MESA_PROFILE STREQUAL "riscv64")
         target_compile_options(softpipe PRIVATE
             "$<$<COMPILE_LANGUAGE:C>:-fvisibility=hidden>"
             "$<$<COMPILE_LANGUAGE:C>:-DXXH_FORCE_ALIGN_CHECK=0>"
@@ -2094,7 +2099,7 @@ target_link_libraries(mesa_gallium PRIVATE
     "glapi"
     "galliumvl_stub"
     "xmlconfig"
-    "-lm"
+    ${MESA_LINK_LIBM}
     "-lkernel32"
     "-luser32"
     "-lwinspool"
@@ -2129,7 +2134,7 @@ target_link_libraries(mesa_gallium PRIVATE
     "-lws2_32"
 )
 target_link_libraries(mesa_gallium PRIVATE
-    "-lsynchronization"
+    ${MESA_LINK_SYNCHRONIZATION}
 )
 target_link_libraries(mesa_gallium PRIVATE
     "-lgdi32"
@@ -2209,7 +2214,7 @@ target_link_libraries(opengl32 PRIVATE
     "mesa_util_simd"
     "blake3"
     "mesa_util_c11"
-    "-lm"
+    ${MESA_LINK_LIBM}
     "-lkernel32"
     "-luser32"
     "-lgdi32"
@@ -2231,7 +2236,7 @@ if(MESA_V3D)
     )
 endif()
 target_link_libraries(opengl32 PRIVATE
-    "-lsynchronization"
+    ${MESA_LINK_SYNCHRONIZATION}
 )
 if(MESA_PROFILE STREQUAL "i386" OR MESA_PROFILE STREQUAL "amd64" OR MESA_PROFILE STREQUAL "llvm-amd64")
     target_link_libraries(opengl32 PRIVATE

@@ -112,7 +112,7 @@ if(NOT MESA_LLVMPIPE)
         "-DAMD_LLVM_AVAILABLE=0"
     )
 endif()
-if(MESA_PROFILE STREQUAL "arm64" OR MESA_PROFILE STREQUAL "arm64ec" OR MESA_PROFILE STREQUAL "amd64" OR MESA_PROFILE STREQUAL "llvm-amd64" OR MESA_PROFILE STREQUAL "llvm-arm64")
+if(MESA_PROFILE STREQUAL "arm64" OR MESA_PROFILE STREQUAL "arm64ec" OR MESA_PROFILE STREQUAL "amd64" OR MESA_PROFILE STREQUAL "llvm-amd64" OR MESA_PROFILE STREQUAL "llvm-arm64" OR MESA_PROFILE STREQUAL "riscv64")
     list(APPEND MESA_C_OPTIONS
         "-DHAVE_UINT128"
     )
@@ -284,4 +284,16 @@ if(MESA_LLVMPIPE)
         "-DDRAW_LLVM_AVAILABLE=1"
         "-DAMD_LLVM_AVAILABLE=1"
     )
+endif()
+set(MESA_LINK_LIBM "-lm")
+set(MESA_LINK_SYNCHRONIZATION "-lsynchronization")
+if(MESA_REACTOS_SDK)
+    set(MESA_LINK_LIBM "")
+    set(MESA_LINK_SYNCHRONIZATION "-lkernelbase")
+    foreach(_mesa_mingw_only "-DHAS_SCHED_H" "-DHAVE_ENDIAN_H" "-DHAVE_CET_H" "-DHAVE_STRTOK_R")
+        list(REMOVE_ITEM MESA_C_OPTIONS "${_mesa_mingw_only}")
+        list(REMOVE_ITEM MESA_CXX_OPTIONS "${_mesa_mingw_only}")
+    endforeach()
+    list(APPEND MESA_C_OPTIONS "-D_USE_MATH_DEFINES" "-mno-ms-bitfields")
+    list(APPEND MESA_CXX_OPTIONS "-D_USE_MATH_DEFINES" "-mno-ms-bitfields")
 endif()

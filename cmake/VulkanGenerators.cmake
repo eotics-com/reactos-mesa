@@ -12,8 +12,18 @@ if(MESA_ARCH MATCHES "^arm64")
     list(APPEND _mesa_driconf_inputs
         "${PROJECT_SOURCE_DIR}/src/gallium/drivers/v3d/00-v3d-defaults.conf")
 endif()
-list(APPEND _mesa_driconf_inputs
-    "${_mesa_lvp}/00-lavapipe-defaults.conf")
+if(MESA_LAVAPIPE)
+    list(APPEND _mesa_driconf_inputs
+        "${_mesa_lvp}/00-lavapipe-defaults.conf")
+endif()
+if(MESA_IMAGINATION)
+    list(APPEND _mesa_driconf_inputs
+        "${PROJECT_SOURCE_DIR}/src/imagination/vulkan/00-pvr-defaults.conf")
+endif()
+if(MESA_ZINK)
+    list(APPEND _mesa_driconf_inputs
+        "${PROJECT_SOURCE_DIR}/src/gallium/drivers/zink/00-zink-defaults.conf")
+endif()
 mesa_generate(
     OUTPUT "${PROJECT_BINARY_DIR}/src/util/driconf_static.h"
     COMMAND
@@ -110,7 +120,9 @@ endmacro()
 mesa_vk_entrypoints(src/vulkan/wsi wsi_common wsi)
 mesa_vk_entrypoints(src/vulkan/runtime vk_common vk_common)
 mesa_vk_entrypoints(src/vulkan/runtime vk_cmd_enqueue vk_cmd_enqueue)
-mesa_vk_entrypoints(src/gallium/frontends/lavapipe lvp lvp)
+if(MESA_LAVAPIPE)
+    mesa_vk_entrypoints(src/gallium/frontends/lavapipe lvp lvp)
+endif()
 
 mesa_generate(
     OUTPUT
@@ -172,6 +184,7 @@ mesa_vk_runtime_generated(vk_physical_device_properties ../util/vk_physical_devi
 mesa_vk_runtime_generated(vk_physical_device_spirv_caps ../util/vk_physical_device_spirv_caps_gen.py NO_HEADER)
 mesa_vk_runtime_generated(vk_synchronization_helpers ../util/vk_synchronization_helpers_gen.py NO_HEADER)
 
+if(MESA_LAVAPIPE)
 mesa_generate(
     OUTPUT
         "${PROJECT_BINARY_DIR}/src/gallium/frontends/lavapipe/lvp_drirc.c"
@@ -188,8 +201,12 @@ mesa_generate(
         "${PROJECT_SOURCE_DIR}/src/util/drirc_gen.py"
         "${Python3_EXECUTABLE}")
 
+endif()
+
 if(MESA_ARCH MATCHES "^arm64")
     set(_mesa_vulkan_cpu_family aarch64)
+elseif(MESA_ARCH STREQUAL "riscv64")
+    set(_mesa_vulkan_cpu_family riscv64)
 else()
     set(_mesa_vulkan_cpu_family x86_64)
 endif()
@@ -206,6 +223,7 @@ mesa_generate(
         "${PROJECT_SOURCE_DIR}/bin/gen_vs_module_defs.py"
         "${Python3_EXECUTABLE}")
 
+if(MESA_LAVAPIPE)
 set(MESA_LAVAPIPE_MANIFEST "${PROJECT_BINARY_DIR}/src/gallium/targets/lavapipe/lvp_icd.json")
 mesa_generate(
     OUTPUT "${MESA_LAVAPIPE_MANIFEST}"
@@ -313,3 +331,4 @@ mesa_generate(
     DEPENDS
         "${PROJECT_SOURCE_DIR}/src/compiler/glsl/astc_decoder.glsl"
         "${MESA_GLSLANG_VALIDATOR}")
+endif()
