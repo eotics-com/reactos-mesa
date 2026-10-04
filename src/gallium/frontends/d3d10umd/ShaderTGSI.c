@@ -2309,10 +2309,8 @@ Shader_tgsi_translate(const unsigned *code,
 
       case D3D10_SB_OPCODE_DCL_INDEXABLE_TEMP:
          {
+            struct ureg_dst array;
             uint i;
-
-            /* XXX: Add true indexable temps to gallium.
-             */
 
             assert(opcode.specific.dcl_indexable_temp.index <
                    SHADER_MAX_INDEXABLE_TEMPS);
@@ -2322,8 +2320,11 @@ Shader_tgsi_translate(const unsigned *code,
             sx.indexable_temp_offsets[opcode.specific.dcl_indexable_temp.index] =
                sx.declared_temps;
 
+            array = ureg_DECL_array_temporary(ureg,
+                                              opcode.specific.dcl_indexable_temp.count,
+                                              true);
             for (i = 0; i < opcode.specific.dcl_indexable_temp.count; i++) {
-               sx.temps[sx.declared_temps + i] = ureg_DECL_temporary(ureg);
+               sx.temps[sx.declared_temps + i] = ureg_dst_array_offset(array, i);
             }
             sx.declared_temps += opcode.specific.dcl_indexable_temp.count;
          }
