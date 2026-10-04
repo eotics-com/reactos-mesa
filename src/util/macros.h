@@ -120,6 +120,7 @@
  * Unreachable macro. Useful for suppressing "control reaches end of non-void
  * function" warnings.
  */
+#undef UNREACHABLE
 #if defined(HAVE___BUILTIN_UNREACHABLE) || __has_builtin(__builtin_unreachable)
 #define UNREACHABLE(str)    \
 do {                        \
@@ -216,6 +217,7 @@ do {                       \
 /* Used to optionally mark structures with misaligned elements or size as
  * packed, to trade off performance for space.
  */
+#undef PACKED
 #ifdef HAVE_FUNC_ATTRIBUTE_PACKED
 #  if defined(__MINGW32__) || defined(__MINGW64__)
 #    define PACKED __attribute__((gcc_struct,__packed__))

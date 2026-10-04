@@ -23,11 +23,11 @@
 
 #include "vk_drm_syncobj.h"
 
-#include <sched.h>
 #include <xf86drm.h>
 
 #include "drm-uapi/drm.h"
 
+#include "c11/threads.h"
 #include "util/libsync.h"
 #include "util/os_time.h"
 #include "util/u_sync_provider.h"
@@ -255,7 +255,7 @@ spin_wait_for_sync_file(struct vk_device *device,
          if (os_time_get_nano() >= abs_timeout_ns)
             return VK_TIMEOUT;
 
-         sched_yield();
+         thrd_yield();
       }
    } else {
       for (uint32_t i = 0; i < wait_count; i++) {
@@ -270,7 +270,7 @@ spin_wait_for_sync_file(struct vk_device *device,
             if (os_time_get_nano() >= abs_timeout_ns)
                return VK_TIMEOUT;
 
-            sched_yield();
+            thrd_yield();
          }
       }
    }

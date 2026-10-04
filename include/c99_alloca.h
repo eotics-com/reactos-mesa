@@ -35,6 +35,10 @@
 
 #  define alloca _alloca
 
+#elif defined(_WIN32)
+
+#  include <malloc.h>
+
 #elif defined(__sun) || defined(__CYGWIN__)
 
 #  include <alloca.h>

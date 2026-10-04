@@ -30,13 +30,17 @@
 
 #include <assert.h>
 #include <errno.h>
-#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#endif
 #include <stdlib.h>
 #include <time.h>
 
@@ -71,6 +75,25 @@ sync_valid_fd(int fd)
 	sync_file_info_free(info);
 #endif
 	return true;
+}
+#elif DETECT_OS_WINDOWS
+
+static inline int sync_wait(int fd, int timeout)
+{
+	errno = ENOSYS;
+	return -1;
+}
+
+static inline int sync_merge(const char *name, int fd1, int fd2)
+{
+	errno = ENOSYS;
+	return -1;
+}
+
+static inline bool
+sync_valid_fd(int fd)
+{
+	return false;
 }
 #else
 
