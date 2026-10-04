@@ -154,6 +154,31 @@ lower_basevertex(nir_shader *shader)
 
 
 static bool
+lower_vertex_id_zero_base_instr(nir_builder *b, nir_intrinsic_instr *instr, void *data)
+{
+   if (instr->intrinsic != nir_intrinsic_load_vertex_id_zero_base)
+      return false;
+
+   b->cursor = nir_before_instr(&instr->instr);
+   nir_def_replace(&instr->def,
+                   nir_isub(b, nir_load_vertex_id(b), nir_load_first_vertex(b)));
+   return true;
+}
+
+static bool
+lower_vertex_id_zero_base(nir_shader *shader)
+{
+   if (shader->info.stage != MESA_SHADER_VERTEX)
+      return false;
+
+   if (!BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_VERTEX_ID_ZERO_BASE))
+      return false;
+
+   return nir_shader_intrinsics_pass(shader, lower_vertex_id_zero_base_instr,
+                                     nir_metadata_control_flow, NULL);
+}
+
+static bool
 lower_drawid_instr(nir_builder *b, nir_intrinsic_instr *instr, void *data)
 {
    if (instr->intrinsic != nir_intrinsic_load_draw_id)
@@ -5699,6 +5724,7 @@ zink_shader_init(struct zink_screen *screen, struct zink_shader *zs)
    if (!mesa_shader_stage_is_compute(nir->info.stage) && nir->info.separate_shader)
       NIR_PASS(_, nir, fixup_io_locations);
 
+   NIR_PASS(_, nir, lower_vertex_id_zero_base);
    NIR_PASS(_, nir, lower_basevertex);
    NIR_PASS(_, nir, lower_baseinstance);
    NIR_PASS(_, nir, split_bitfields);
