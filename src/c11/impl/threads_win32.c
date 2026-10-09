@@ -344,6 +344,9 @@ void
 thrd_exit(int res)
 {
     _endthreadex((unsigned)res);
+#ifdef __REACTOS__
+    __builtin_unreachable();
+#endif
 }
 
 // 7.25.5.6
