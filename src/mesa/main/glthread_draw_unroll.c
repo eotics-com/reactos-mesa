@@ -103,6 +103,57 @@
    UBYTE_TO_FLOAT(((x) >> 24) & 0xff) \
 }
 
+#ifdef __REACTOS__
+#define TEMPLATE_FUNC1(t, src, type, dst, conv) \
+   static void GLAPIENTRY _mesa_wrapped_VertexAttrib##t##1##src(GLuint index, type *v) \
+   { \
+      _mesa_marshal_VertexAttrib##t##1##dst(index, conv(v[0])); \
+   }
+
+#define TEMPLATE_FUNC2(t, src, type, dst, conv) \
+   static void GLAPIENTRY _mesa_wrapped_VertexAttrib##t##2##src(GLuint index, type *v) \
+   { \
+      _mesa_marshal_VertexAttrib##t##2##dst(index, conv(v[0]), conv(v[1])); \
+   }
+
+#define TEMPLATE_FUNC3(t, src, type, dst, conv) \
+   static void GLAPIENTRY _mesa_wrapped_VertexAttrib##t##3##src(GLuint index, type *v) \
+   { \
+      _mesa_marshal_VertexAttrib##t##3##dst(index, conv(v[0]), conv(v[1]), \
+                                             conv(v[2])); \
+   }
+
+#define TEMPLATE_FUNC4(t, src, type, dst, conv) \
+   static void GLAPIENTRY _mesa_wrapped_VertexAttrib##t##4##src(GLuint index, type *v) \
+   { \
+      _mesa_marshal_VertexAttrib##t##4##dst(index, conv(v[0]), conv(v[1]), \
+                                            conv(v[2]), conv(v[3])); \
+   }
+
+#define SCALED false
+#define NORMALIZED true
+
+#define TEMPLATE_FUNCP(n, src, type, normalized) \
+   static void GLAPIENTRY _mesa_wrapped_VertexAttribP##n##src(GLuint index, GLuint *v) \
+   { \
+      _mesa_marshal_VertexAttribP##n##ui(index, type, normalized, v[0]); \
+   }
+
+#define TEMPLATE_FUNCUP(n, src, dst, unpack) \
+   static void GLAPIENTRY _mesa_wrapped_VertexAttribP##n##src(GLuint index, GLuint *v) \
+   { \
+      float fv[n] = unpack(v[0]); \
+      _mesa_marshal_VertexAttrib##n##dst(index, fv); \
+   }
+
+#define TEMPLATE_FUNCUP_CTX(n, src, dst, unpack) \
+   static void GLAPIENTRY _mesa_wrapped_VertexAttribP##n##src(GLuint index, GLuint *v) \
+   { \
+      GET_CURRENT_CONTEXT(ctx); \
+      float fv[n] = unpack(v[0]); \
+      _mesa_marshal_VertexAttrib##n##dst(index, fv); \
+   }
+#else
 #define TEMPLATE_FUNC1(t, src, type, dst, conv) \
    static void _mesa_wrapped_VertexAttrib##t##1##src(GLuint index, type *v) \
    { \
@@ -152,6 +203,7 @@
       float fv[n] = unpack(v[0]); \
       _mesa_marshal_VertexAttrib##n##dst(index, fv); \
    }
+#endif
 
 #define TEMPLATE_FUNC_ALL3(t, src, type, dst, conv) \
    TEMPLATE_FUNC1(t, src, type, dst, conv) \
