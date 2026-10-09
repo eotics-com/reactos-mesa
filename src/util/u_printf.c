@@ -43,8 +43,10 @@
 
 /* Some versions of MinGW are missing _vscprintf's declaration, although they
  * still provide the symbol in the import library. */
+#ifndef __REACTOS__
 #ifdef __MINGW32__
 _CRTIMP int _vscprintf(const char *format, va_list argptr);
+#endif
 #endif
 
 const char*
