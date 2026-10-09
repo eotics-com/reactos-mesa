@@ -219,7 +219,7 @@ target_link_libraries(vulkan_lvp PRIVATE
     "-static-libgcc"
     "-static-libstdc++"
     "-pthread"
-    "-lm"
+    ${MESA_LINK_LIBM}
     "-ladvapi32"
     "-lntdll"
     "-lole32"
@@ -227,7 +227,7 @@ target_link_libraries(vulkan_lvp PRIVATE
     "-lshell32"
     "-luuid"
     "-lws2_32"
-    "-lsynchronization"
+    ${MESA_LINK_SYNCHRONIZATION}
     "-lkernel32"
     "-luser32"
     "-lgdi32"

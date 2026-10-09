@@ -90,12 +90,12 @@ target_link_libraries(rpi5vc4d3d PRIVATE
     "${MESA_REACTOS_BUILD_DIR}/sdk/lib/3rdparty/zlib/libzlib.a"
     "-static-libgcc"
     "-static-libstdc++"
-    "-lm"
+    ${MESA_LINK_LIBM}
     "-lkernel32"
     "-luser32"
     "-lgdi32"
     "-ladvapi32"
-    "-lsynchronization"
+    ${MESA_LINK_SYNCHRONIZATION}
     "-lws2_32")
 set_target_properties(rpi5vc4d3d PROPERTIES
     PREFIX ""
