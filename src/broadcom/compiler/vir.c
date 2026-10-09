@@ -28,6 +28,7 @@
 #include "compiler/nir/nir_builtin_builder.h"
 #include "compiler/nir/nir_format_convert.h"
 #include "util/perf/cpu_trace.h"
+#include "util/u_string.h"
 
 int
 vir_get_nsrc(struct qinst *inst)
