@@ -188,6 +188,8 @@ target_sources(lavapipe_st PRIVATE
 
 add_library(vulkan_lvp SHARED EXCLUDE_FROM_ALL)
 mesa_vulkan_target_defaults(vulkan_lvp)
+target_compile_definitions(vulkan_lvp PRIVATE GALLIUM_LLVMPIPE)
+target_include_directories(vulkan_lvp PRIVATE "${PROJECT_SOURCE_DIR}/src/gallium/drivers")
 target_sources(vulkan_lvp PRIVATE
     "${PROJECT_SOURCE_DIR}/src/gallium/targets/lavapipe/lavapipe_target.c"
     "${MESA_VULKAN_DEF}")
